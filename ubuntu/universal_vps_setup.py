@@ -10,6 +10,7 @@ import os
 import sys
 import subprocess
 import time
+import json
 from pathlib import Path
 import getpass
 import tkinter as tk
@@ -18,6 +19,8 @@ import threading
 import secrets
 import string
 import re
+
+STATE_FILE = "/var/lib/vps-setup/state.json"
 
 class Colors:
     """Terminal colors for better UX"""
@@ -32,14 +35,41 @@ class Colors:
 
 class UniversalVPSSetup:
     def __init__(self):
-        self.tailscale_ip = None
         self.setup_log = []
         self.os_info = self._detect_os_info()
         self.is_desktop_env = self.detect_desktop_environment()
         self.gui_available = self.is_desktop_env and self.check_display()
         self.initial_access_method = self.detect_access_method()
-        self.desktop_type = None     # set by detect_and_setup_desktop()
-        self.rdp_username = None     # set by create_rdp_user()
+
+        # Restore persisted state so re-runs skip completed steps
+        state = self._load_state()
+        self.desktop_type = state.get("desktop_type")
+        self.rdp_username = state.get("rdp_username")
+        self.tailscale_ip = state.get("tailscale_ip")
+
+    # ── State management ──────────────────────────────────────────────────────
+
+    def _load_state(self):
+        """Load setup progress from disk"""
+        try:
+            with open(STATE_FILE) as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_state(self, **kwargs):
+        """Persist setup progress to disk"""
+        state = self._load_state()
+        state.update(kwargs)
+        Path(STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+
+    def _step_done(self, step):
+        """Return True if a step has already been completed"""
+        return self._load_state().get(step, False)
+
+    # ── OS / service helpers ──────────────────────────────────────────────────
 
     def _detect_os_info(self):
         """Read /etc/os-release and return a dict of OS metadata"""
@@ -72,6 +102,8 @@ class UniversalVPSSetup:
         service = self.find_service(*candidates)
         self.run_command(f"systemctl {action} {service}")
 
+    # ── Environment detection ─────────────────────────────────────────────────
+
     def detect_desktop_environment(self):
         """Detect if we're running in a desktop environment"""
         # DISPLAY is deliberately excluded — SSH X11 forwarding sets it on
@@ -103,7 +135,6 @@ class UniversalVPSSetup:
     def check_display(self):
         """Check if GUI display is available"""
         try:
-            # Try to create a simple tkinter window
             root = tk.Tk()
             root.withdraw()
             return True
@@ -149,13 +180,14 @@ class UniversalVPSSetup:
             return "RDP"
         return "CONSOLE"
 
+    # ── Logging ───────────────────────────────────────────────────────────────
+
     def log(self, message, level="INFO"):
         """Log messages with timestamps and optional GUI display"""
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         log_entry = f"[{timestamp}] {level}: {message}"
         self.setup_log.append(log_entry)
 
-        # Console output
         if level == "ERROR":
             print(f"{Colors.FAIL}{log_entry}{Colors.ENDC}")
         elif level == "WARNING":
@@ -165,7 +197,6 @@ class UniversalVPSSetup:
         else:
             print(f"{Colors.CYAN}{log_entry}{Colors.ENDC}")
 
-        # GUI notification for important messages in RDP mode
         if self.gui_available and level in ["ERROR", "WARNING", "SUCCESS"] and self.initial_access_method == "RDP":
             try:
                 root = tk.Tk()
@@ -178,7 +209,9 @@ class UniversalVPSSetup:
                     messagebox.showinfo("Setup Success", message)
                 root.destroy()
             except:
-                pass  # GUI not available, continue with console only
+                pass
+
+    # ── UI helpers ────────────────────────────────────────────────────────────
 
     def show_startup_message(self):
         """Display appropriate startup message based on access method"""
@@ -189,11 +222,19 @@ class UniversalVPSSetup:
         print(f"{Colors.ENDC}")
 
         os_name = self.os_info.get("PRETTY_NAME", "Unknown OS")
+        state = self._load_state()
+        completed = [k for k, v in state.items() if v and not k.startswith(("desktop_type", "rdp_username", "tailscale_ip"))]
+
         print(f"{Colors.CYAN}Detected Environment:{Colors.ENDC}")
         print(f"  • OS: {Colors.BOLD}{os_name}{Colors.ENDC}")
         print(f"  • Access Method: {Colors.BOLD}{self.initial_access_method}{Colors.ENDC}")
         print(f"  • Desktop Environment: {Colors.BOLD}{'Yes' if self.is_desktop_env else 'No'}{Colors.ENDC}")
         print(f"  • GUI Available: {Colors.BOLD}{'Yes' if self.gui_available else 'No'}{Colors.ENDC}")
+
+        if completed:
+            print(f"\n{Colors.GREEN}Resuming — steps already completed:{Colors.ENDC}")
+            for step in completed:
+                print(f"  {Colors.GREEN}✓{Colors.ENDC}  {step.replace('_', ' ').title()}")
 
         if self.initial_access_method == "RDP":
             print(f"\n{Colors.GREEN}RDP Mode Detected:{Colors.ENDC}")
@@ -233,6 +274,93 @@ class UniversalVPSSetup:
         print("  • This script requires root privileges")
         print("  • Your server will be locked down to Tailscale-only access")
         print("  • Have your Tailscale account ready (free at tailscale.com)")
+
+    def show_gui_progress(self, title, message):
+        """Show a progress window for long-running operations"""
+        if not self.gui_available:
+            return
+
+        def show_progress():
+            try:
+                progress_window = tk.Tk()
+                progress_window.title(title)
+                progress_window.geometry("400x150")
+                progress_window.resizable(False, False)
+
+                progress_window.update_idletasks()
+                x = (progress_window.winfo_screenwidth() // 2) - (400 // 2)
+                y = (progress_window.winfo_screenheight() // 2) - (150 // 2)
+                progress_window.geometry(f"400x150+{x}+{y}")
+
+                label = tk.Label(progress_window, text=message, wraplength=350)
+                label.pack(pady=20)
+
+                progress_window.after(5000, progress_window.destroy)
+                progress_window.mainloop()
+            except:
+                pass
+
+        thread = threading.Thread(target=show_progress)
+        thread.daemon = True
+        thread.start()
+
+    def get_user_input(self, message, options, default_index=0):
+        """Get user input via GUI or console based on environment"""
+        if self.gui_available and self.initial_access_method == "RDP":
+            try:
+                root = tk.Tk()
+                root.withdraw()
+
+                dialog = tk.Toplevel()
+                dialog.title("Setup Choice")
+                dialog.geometry("500x200")
+                dialog.resizable(False, False)
+
+                dialog.update_idletasks()
+                x = (dialog.winfo_screenwidth() // 2) - (500 // 2)
+                y = (dialog.winfo_screenheight() // 2) - (200 // 2)
+                dialog.geometry(f"500x200+{x}+{y}")
+
+                result = [default_index]
+
+                tk.Label(dialog, text=message, wraplength=450).pack(pady=20)
+
+                button_frame = tk.Frame(dialog)
+                button_frame.pack(pady=10)
+
+                for i, option in enumerate(options):
+                    btn = tk.Button(
+                        button_frame,
+                        text=option,
+                        command=lambda idx=i: [result.__setitem__(0, idx), dialog.destroy()]
+                    )
+                    btn.pack(side=tk.LEFT, padx=10)
+
+                dialog.wait_window()
+                root.destroy()
+                return result[0]
+
+            except:
+                pass
+
+        print(f"\n{Colors.CYAN}{message}{Colors.ENDC}")
+        for i, option in enumerate(options):
+            print(f"  {i+1}. {option}")
+
+        while True:
+            try:
+                choice = input(f"\nEnter choice (1-{len(options)}) [default: {default_index+1}]: ").strip()
+                if not choice:
+                    return default_index
+                choice_idx = int(choice) - 1
+                if 0 <= choice_idx < len(options):
+                    return choice_idx
+                else:
+                    print(f"{Colors.WARNING}Please enter a number between 1 and {len(options)}{Colors.ENDC}")
+            except (ValueError, KeyboardInterrupt):
+                print(f"{Colors.WARNING}Invalid input. Please enter a number.{Colors.ENDC}")
+
+    # ── Setup steps ───────────────────────────────────────────────────────────
 
     def run_command(self, command, check=True, shell=True, capture_output=True):
         """Execute shell commands with proper error handling"""
@@ -277,6 +405,10 @@ class UniversalVPSSetup:
 
     def update_system(self):
         """Update package lists and upgrade system"""
+        if self._step_done("system_updated"):
+            self.log("System update already completed — skipping", "SUCCESS")
+            return
+
         print(f"\n{Colors.HEADER}=== SYSTEM UPDATE ==={Colors.ENDC}")
         self.log("Starting system update...")
 
@@ -288,65 +420,30 @@ class UniversalVPSSetup:
         self.run_command("apt install -y curl wget gnupg2 software-properties-common python3-tk")
 
         self.log("System update completed", "SUCCESS")
-
-    def show_gui_progress(self, title, message):
-        """Show a progress window for long-running operations"""
-        if not self.gui_available:
-            return
-
-        def show_progress():
-            try:
-                progress_window = tk.Tk()
-                progress_window.title(title)
-                progress_window.geometry("400x150")
-                progress_window.resizable(False, False)
-
-                # Center the window
-                progress_window.update_idletasks()
-                x = (progress_window.winfo_screenwidth() // 2) - (400 // 2)
-                y = (progress_window.winfo_screenheight() // 2) - (150 // 2)
-                progress_window.geometry(f"400x150+{x}+{y}")
-
-                label = tk.Label(progress_window, text=message, wraplength=350)
-                label.pack(pady=20)
-
-                progress_window.after(5000, progress_window.destroy)  # Auto-close after 5 seconds
-                progress_window.mainloop()
-            except:
-                pass
-
-        # Run in separate thread to not block main execution
-        thread = threading.Thread(target=show_progress)
-        thread.daemon = True
-        thread.start()
+        self._save_state(system_updated=True)
 
     def detect_and_setup_desktop(self):
         """Detect installed desktop environment and install one if absent"""
+        if self._step_done("desktop_setup"):
+            self.log(f"Desktop setup already completed ({self.desktop_type}) — skipping", "SUCCESS")
+            return
+
         print(f"\n{Colors.HEADER}=== DESKTOP ENVIRONMENT DETECTION ==={Colors.ENDC}")
 
-        # Check for XFCE
         result = self.run_command("dpkg -l xfce4-session 2>/dev/null | grep '^ii'", check=False)
         if result.returncode == 0:
             detected = "xfce"
         else:
-            # Check for GNOME (gnome-shell or gdm3)
             result = self.run_command(
                 "dpkg -l gnome-shell 2>/dev/null | grep '^ii' || dpkg -l gdm3 2>/dev/null | grep '^ii'",
                 check=False
             )
-            if result.returncode == 0:
-                detected = "gnome"
-            else:
-                detected = "none"
+            detected = "gnome" if result.returncode == 0 else "none"
 
         if detected == "none":
             self.log("No desktop environment found — installing XFCE + LightDM + xrdp...", "WARNING")
-            self.run_command(
-                "apt install -y xfce4 xfce4-goodies lightdm xrdp",
-                capture_output=False
-            )
+            self.run_command("apt install -y xfce4 xfce4-goodies lightdm xrdp", capture_output=False)
 
-            # Write lightdm.conf to force XFCE session and disable Wayland
             Path("/etc/lightdm").mkdir(parents=True, exist_ok=True)
             with open("/etc/lightdm/lightdm.conf", "w") as f:
                 f.write("[Seat:*]\nWaylandEnable=false\nuser-session=xfce\n")
@@ -358,7 +455,6 @@ class UniversalVPSSetup:
         else:
             self.log(f"Detected desktop environment: {detected}", "SUCCESS")
 
-            # Install xrdp if missing on an existing DE
             result = self.run_command("dpkg -l xrdp 2>/dev/null | grep '^ii'", check=False)
             if result.returncode != 0:
                 self.log("xrdp not found on existing desktop — installing xrdp only...", "WARNING")
@@ -367,12 +463,16 @@ class UniversalVPSSetup:
 
         self.desktop_type = detected
         self.log(f"Desktop type set to: {self.desktop_type}", "SUCCESS")
+        self._save_state(desktop_setup=True, desktop_type=detected)
 
     def create_rdp_user(self):
         """Create a dedicated RDP user with a generated password"""
+        if self._step_done("rdp_user_created"):
+            self.log(f"RDP user '{self.rdp_username}' already created — skipping", "SUCCESS")
+            return
+
         print(f"\n{Colors.HEADER}=== RDP USER CREATION ==={Colors.ENDC}")
 
-        # Prompt for username with validation loop
         while True:
             username = None
             if self.gui_available:
@@ -399,7 +499,6 @@ class UniversalVPSSetup:
                 print(f"{Colors.WARNING}Username may only contain letters, digits, underscores, and hyphens.{Colors.ENDC}")
                 continue
 
-            # Check if user already exists
             result = self.run_command(f"id {username}", check=False)
             if result.returncode == 0:
                 self.log(f"User '{username}' already exists", "WARNING")
@@ -408,14 +507,15 @@ class UniversalVPSSetup:
                     ["Use existing user", "Pick a different name", "Exit setup"],
                     default_index=0
                 )
-                if choice == 0:  # Use existing
+                if choice == 0:
                     self.rdp_username = username
                     self.run_command(f"usermod -aG sudo {username}", check=False)
                     self.log(f"Using existing user: {username} (ensured sudo membership)", "SUCCESS")
+                    self._save_state(rdp_user_created=True, rdp_username=username)
                     return
-                elif choice == 1:  # Pick different name
+                elif choice == 1:
                     continue
-                else:  # Exit
+                else:
                     sys.exit(0)
 
             break
@@ -428,7 +528,6 @@ class UniversalVPSSetup:
         )
         generated_password = ''.join(secrets.choice(safe_chars) for _ in range(16))
 
-        # Show generated password and let user keep it or set their own
         def show_cred_box(uname, pwd, extra_line=None):
             box_width = max(44, len(uname) + 16, len(pwd) + 16)
             inner = box_width - 2
@@ -457,7 +556,6 @@ class UniversalVPSSetup:
         )
 
         if pwd_choice == 1:
-            # Let user set their own password (prompted twice to confirm)
             while True:
                 pwd1 = getpass.getpass(f"\n{Colors.CYAN}Enter your password: {Colors.ENDC}")
                 if not pwd1:
@@ -473,14 +571,12 @@ class UniversalVPSSetup:
         else:
             password = generated_password
 
-        # Create user — try with 'input' group, retry without if the group is absent
         try:
             self.run_command(f"useradd -m -s /bin/bash -G sudo,audio,video,input {username}")
         except subprocess.CalledProcessError:
             self.log("'input' group not found, retrying without it...", "WARNING")
             self.run_command(f"useradd -m -s /bin/bash -G sudo,audio,video {username}")
 
-        # Set password via stdin — never shell=True to keep password out of the process list
         cp_result = subprocess.run(
             ['chpasswd'],
             input=f"{username}:{password}",
@@ -491,14 +587,12 @@ class UniversalVPSSetup:
             self.log(f"Failed to set password: {cp_result.stderr}", "ERROR")
             raise subprocess.CalledProcessError(cp_result.returncode, 'chpasswd')
 
-        # Write .xsession so xrdp launches XFCE for this user
         xsession_path = f"/home/{username}/.xsession"
         with open(xsession_path, "w") as f:
             f.write("#!/bin/bash\nexec xfce4-session\n")
         self.run_command(f"chown {username}:{username} {xsession_path}")
         self.run_command(f"chmod 755 {xsession_path}")
 
-        # Hold until user confirms they have saved their credentials
         print(f"{Colors.WARNING}{Colors.BOLD}  Make sure you have saved your username and password!{Colors.ENDC}")
         input(f"{Colors.CYAN}  Press Enter once you have saved your credentials to continue...{Colors.ENDC}")
         print()
@@ -520,17 +614,19 @@ class UniversalVPSSetup:
 
         self.rdp_username = username
         self.log(f"RDP user '{username}' created successfully", "SUCCESS")
+        self._save_state(rdp_user_created=True, rdp_username=username)
 
     def configure_rdp_persistence(self):
-        """Ensure xrdp is installed and configured for session persistence.
-        Checks existing config before making any changes - only touches what needs fixing."""
+        """Ensure xrdp is installed and configured for session persistence."""
+        if self._step_done("rdp_configured"):
+            self.log("RDP persistence already configured — skipping", "SUCCESS")
+            return
+
         print(f"\n{Colors.HEADER}=== RDP SESSION PERSISTENCE ==={Colors.ENDC}")
 
         changes_made = []
         needs_xrdp_restart = False
 
-        # 1. Check if xrdp is installed (detect_and_setup_desktop handles the full DE install;
-        #    this is a safety net for any edge case where xrdp is still absent)
         result = self.run_command("dpkg -l xrdp 2>/dev/null | grep '^ii'", check=False)
         if result.returncode != 0:
             self.log("xrdp not found, installing...")
@@ -542,18 +638,12 @@ class UniversalVPSSetup:
         else:
             self.log("xrdp is already installed", "SUCCESS")
 
-        # 2. Check xrdp.ini for the Xorg module (required for session persistence)
-        # The Xorg module (libxup.so) attaches to an existing X session on reconnect.
-        # Xvnc creates a new session each time - apps would not persist.
         xrdp_ini_path = "/etc/xrdp/xrdp.ini"
         try:
             with open(xrdp_ini_path, "r") as f:
                 xrdp_config = f.read()
 
-            has_xorg_section = "[Xorg]" in xrdp_config
-            has_libxup = "libxup.so" in xrdp_config
-
-            if has_xorg_section and has_libxup:
+            if "[Xorg]" in xrdp_config and "libxup.so" in xrdp_config:
                 self.log("xrdp Xorg persistence module is already configured", "SUCCESS")
             else:
                 self.log("Xorg persistence module missing from xrdp config, adding it...")
@@ -576,7 +666,6 @@ code=20
         except FileNotFoundError:
             self.log("xrdp.ini not found - xrdp may not have installed correctly", "ERROR")
 
-        # 3. Configure sleep/lock settings per desktop type
         self.log("Checking session idle/sleep/lock settings...")
         if self.desktop_type == "xfce":
             self._configure_xfce_persistence()
@@ -585,15 +674,12 @@ code=20
         else:
             self.log("Unknown desktop type — skipping sleep/lock config", "WARNING")
 
-        # 4. Temporarily open RDP port (will be locked to Tailscale subnet at lockdown step)
         self.run_command("ufw allow 3389/tcp", check=False)
 
-        # 5. Report results and handle xrdp restart
         if not changes_made:
             self.log("RDP session persistence is already properly configured - no changes needed", "SUCCESS")
-            return
-
-        self.log(f"Changes applied: {', '.join(changes_made)}", "SUCCESS")
+        else:
+            self.log(f"Changes applied: {', '.join(changes_made)}", "SUCCESS")
 
         if needs_xrdp_restart:
             self.service_command("enable", "xrdp")
@@ -621,6 +707,8 @@ code=20
 
             self.service_command("restart", "xrdp")
             self.log("xrdp restarted with persistence configuration", "SUCCESS")
+
+        self._save_state(rdp_configured=True)
 
     def _configure_xfce_persistence(self):
         """Write idempotent XFCE xfconf XML files to disable sleep, DPMS, and screen lock"""
@@ -696,7 +784,6 @@ lock-enabled=false
         else:
             dconf_file.write_text(dconf_config)
 
-            # Lock these settings so users can't accidentally re-enable sleep/lock
             locks_dir = dconf_dir / "locks"
             locks_dir.mkdir(parents=True, exist_ok=True)
             with open(locks_dir / "00-rdp-persistence", "w") as f:
@@ -708,86 +795,47 @@ lock-enabled=false
             self.run_command("dconf update")
             self.log("GNOME sleep and screen lock disabled", "SUCCESS")
 
-    def get_user_input(self, message, options, default_index=0):
-        """Get user input via GUI or console based on environment"""
-        if self.gui_available and self.initial_access_method == "RDP":
-            try:
-                root = tk.Tk()
-                root.withdraw()
-
-                # Create custom dialog
-                dialog = tk.Toplevel()
-                dialog.title("Setup Choice")
-                dialog.geometry("500x200")
-                dialog.resizable(False, False)
-
-                # Center the dialog
-                dialog.update_idletasks()
-                x = (dialog.winfo_screenwidth() // 2) - (500 // 2)
-                y = (dialog.winfo_screenheight() // 2) - (200 // 2)
-                dialog.geometry(f"500x200+{x}+{y}")
-
-                result = [default_index]  # Use list for closure
-
-                tk.Label(dialog, text=message, wraplength=450).pack(pady=20)
-
-                button_frame = tk.Frame(dialog)
-                button_frame.pack(pady=10)
-
-                for i, option in enumerate(options):
-                    btn = tk.Button(
-                        button_frame,
-                        text=option,
-                        command=lambda idx=i: [result.__setitem__(0, idx), dialog.destroy()]
-                    )
-                    btn.pack(side=tk.LEFT, padx=10)
-
-                dialog.wait_window()
-                root.destroy()
-                return result[0]
-
-            except:
-                pass  # Fall back to console
-
-        # Console input
-        print(f"\n{Colors.CYAN}{message}{Colors.ENDC}")
-        for i, option in enumerate(options):
-            print(f"  {i+1}. {option}")
-
-        while True:
-            try:
-                choice = input(f"\nEnter choice (1-{len(options)}) [default: {default_index+1}]: ").strip()
-                if not choice:
-                    return default_index
-                choice_idx = int(choice) - 1
-                if 0 <= choice_idx < len(options):
-                    return choice_idx
-                else:
-                    print(f"{Colors.WARNING}Please enter a number between 1 and {len(options)}{Colors.ENDC}")
-            except (ValueError, KeyboardInterrupt):
-                print(f"{Colors.WARNING}Invalid input. Please enter a number.{Colors.ENDC}")
-
     def install_tailscale(self):
         """Install Tailscale"""
+        if self._step_done("tailscale_installed"):
+            self.log("Tailscale already installed — skipping", "SUCCESS")
+            return
+
         print(f"\n{Colors.HEADER}=== TAILSCALE INSTALLATION ==={Colors.ENDC}")
         self.log("Installing Tailscale...")
+
+        # Check if already installed on the system even without state file
+        result = self.run_command("which tailscale", check=False)
+        if result.returncode == 0:
+            self.log("Tailscale binary already present — skipping install", "SUCCESS")
+            self._save_state(tailscale_installed=True)
+            return
 
         if self.gui_available:
             self.show_gui_progress("Installing Tailscale", "Adding repository and installing VPN client...")
 
-        # Add Tailscale repository
         codename = self.get_os_codename()
         self.run_command(f"curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/{codename}.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null")
         self.run_command(f'curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/{codename}.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list')
-
-        # Install Tailscale
         self.run_command("apt update")
         self.run_command("apt install -y tailscale")
 
         self.log("Tailscale installed successfully", "SUCCESS")
+        self._save_state(tailscale_installed=True)
 
     def configure_tailscale(self):
         """Interactive Tailscale configuration"""
+        # Check if already authenticated — works even without state file
+        result = self.run_command("tailscale status", check=False)
+        if result.returncode == 0 and self.tailscale_ip:
+            self.log(f"Tailscale already authenticated (IP: {self.tailscale_ip}) — skipping", "SUCCESS")
+            self._save_state(tailscale_configured=True, tailscale_ip=self.tailscale_ip)
+            return True
+
+        if self._step_done("tailscale_configured") and self.tailscale_ip:
+            self.log(f"Tailscale already configured (IP: {self.tailscale_ip}) — skipping", "SUCCESS")
+            return True
+
         print(f"\n{Colors.HEADER}=== TAILSCALE CONFIGURATION ==={Colors.ENDC}")
 
         print(f"""
@@ -822,11 +870,10 @@ lock-enabled=false
             default_index=0
         )
 
-        if proceed == 1:  # Needs to create account
+        if proceed == 1:
             print(f"\n{Colors.CYAN}  Go to {Colors.BOLD}https://tailscale.com{Colors.ENDC}{Colors.CYAN} and create your free account.{Colors.ENDC}")
             print(f"{Colors.CYAN}  Come back and re-run this setup once your account is ready.{Colors.ENDC}\n")
             input(f"{Colors.WARNING}  Press Enter once your account is created and you are ready to continue...{Colors.ENDC}")
-            # Re-ask now that they've had time to create an account
             proceed = self.get_user_input(
                 "Ready to authenticate with Tailscale?",
                 ["Yes, authenticate now", "Skip Tailscale setup"],
@@ -836,11 +883,10 @@ lock-enabled=false
                 self.log("Tailscale setup skipped by user", "WARNING")
                 return False
 
-        if proceed == 2:  # Skip
+        if proceed == 2:
             self.log("Tailscale setup skipped by user", "WARNING")
             return False
 
-        # Start Tailscale with authentication
         try:
             self.run_command("tailscale up", capture_output=False)
         except subprocess.CalledProcessError:
@@ -851,19 +897,19 @@ lock-enabled=false
                 default_index=0
             )
 
-            if retry == 0:  # Retry
+            if retry == 0:
                 self.run_command("tailscale up --reset", capture_output=False)
-            elif retry == 1:  # Continue without
+            elif retry == 1:
                 return False
-            else:  # Exit
+            else:
                 sys.exit(0)
 
-        # Get Tailscale IP
-        time.sleep(5)  # Wait for IP assignment
+        time.sleep(5)
         try:
             result = self.run_command("tailscale ip -4")
             self.tailscale_ip = result.stdout.strip()
             self.log(f"Tailscale IP assigned: {self.tailscale_ip}", "SUCCESS")
+            self._save_state(tailscale_configured=True, tailscale_ip=self.tailscale_ip)
             return True
         except:
             self.log("Failed to get Tailscale IP", "ERROR")
@@ -877,10 +923,7 @@ lock-enabled=false
             self.log("No Tailscale IP available for testing", "ERROR")
             return False
 
-        test_message = f"Your server's Tailscale IP is: {self.tailscale_ip}"
-
         if self.initial_access_method == "SSH":
-            # SSH users need to test from another device
             rdp_user = self.rdp_username or "your-rdp-user"
 
             print(f"""
@@ -911,37 +954,36 @@ lock-enabled=false
                     default_index=0
                 )
 
-                if test_result == 0:  # Yes
+                if test_result == 0:
                     self.log("Tailscale connectivity confirmed", "SUCCESS")
                     return True
-                elif test_result == 2:  # Skip
+                elif test_result == 2:
                     self.log("User chose to skip connection test", "WARNING")
                     return True
-                else:  # No
+                else:
                     troubleshoot = self.get_user_input(
                         "Connection issues detected. What would you like to do?",
                         ["Get troubleshooting help", "Retry test", "Continue anyway (risky)", "Exit setup"],
                         default_index=1
                     )
 
-                    if troubleshoot == 0:  # Help
+                    if troubleshoot == 0:
                         self.show_troubleshooting_help()
-                    elif troubleshoot == 1:  # Retry
+                    elif troubleshoot == 1:
                         continue
-                    elif troubleshoot == 2:  # Continue
+                    elif troubleshoot == 2:
                         return True
-                    else:  # Exit
+                    else:
                         sys.exit(0)
 
         elif self.initial_access_method == "RDP":
-            # RDP users are already connected, just verify Tailscale is working
             if self.gui_available:
                 try:
                     root = tk.Tk()
                     root.withdraw()
                     result = messagebox.askyesno(
                         "Tailscale Test",
-                        f"{test_message}\n\n"
+                        f"Your server's Tailscale IP is: {self.tailscale_ip}\n\n"
                         f"Tailscale should now be running.\n"
                         f"You can test SSH access from another device if desired.\n\n"
                         f"Continue with server lockdown?"
@@ -955,9 +997,8 @@ lock-enabled=false
                 except:
                     pass
 
-            # Console fallback
             result = self.get_user_input(
-                f"{test_message}\n\nTailscale is now running. Continue with server lockdown?",
+                f"Tailscale IP: {self.tailscale_ip}\n\nTailscale is now running. Continue with server lockdown?",
                 ["Yes, continue", "No, troubleshoot first"],
                 default_index=0
             )
@@ -987,7 +1028,7 @@ TAILSCALE TROUBLESHOOTING:
 
 4. SSH Issues:
    • Command: ssh username@{tailscale_ip}
-   • Check SSH service is running: systemctl status sshd
+   • Check SSH service is running: systemctl status ssh
    • Verify SSH allows connections from Tailscale network
         """.format(tailscale_ip=self.tailscale_ip)
 
@@ -996,7 +1037,6 @@ TAILSCALE TROUBLESHOOTING:
                 root = tk.Tk()
                 root.withdraw()
 
-                # Create scrollable text window
                 help_window = tk.Toplevel()
                 help_window.title("Troubleshooting Help")
                 help_window.geometry("600x400")
@@ -1023,6 +1063,10 @@ TAILSCALE TROUBLESHOOTING:
 
     def lockdown_server(self):
         """Lock down server to only allow Tailscale connections"""
+        if self._step_done("server_locked_down"):
+            self.log("Server already locked down — skipping", "SUCCESS")
+            return True
+
         print(f"\n{Colors.HEADER}=== SERVER LOCKDOWN ==={Colors.ENDC}")
 
         warning_message = ("⚠️  WARNING: Server Lockdown ⚠️\n\n"
@@ -1042,7 +1086,6 @@ TAILSCALE TROUBLESHOOTING:
             except:
                 pass
 
-        # Console confirmation
         print(f"{Colors.FAIL}{Colors.BOLD}WARNING: This will lock down the server!{Colors.ENDC}")
         print(f"{Colors.WARNING}After this step, you will only be able to connect via Tailscale.{Colors.ENDC}")
         print(f"{Colors.WARNING}Make sure you can connect via Tailscale before proceeding.{Colors.ENDC}")
@@ -1054,38 +1097,31 @@ TAILSCALE TROUBLESHOOTING:
 
         self.log("Beginning server lockdown...")
 
-        # Reset UFW and set default policies
         self.run_command("ufw --force reset")
         self.run_command("ufw default deny incoming")
         self.run_command("ufw default allow outgoing")
-
-        # Allow Tailscale interface
         self.run_command("ufw allow in on tailscale0")
         self.run_command("ufw allow out on tailscale0")
 
-        # Allow only Tailscale subnet for SSH and RDP
         tailscale_subnet = "100.64.0.0/10"
         self.run_command(f"ufw allow from {tailscale_subnet} to any port 22")
         self.run_command(f"ufw allow from {tailscale_subnet} to any port 3389")
-
-        # Enable UFW
         self.run_command("ufw --force enable")
 
-        # Configure SSH to only listen on Tailscale interface if we have the IP
         if self.tailscale_ip:
-            ssh_config_addition = f"""
-# Tailscale only configuration
-ListenAddress {self.tailscale_ip}
-"""
+            # Only append ListenAddress if not already present
+            with open("/etc/ssh/sshd_config", "r") as f:
+                sshd_config = f.read()
 
-            with open("/etc/ssh/sshd_config", "a") as f:
-                f.write(ssh_config_addition)
+            if f"ListenAddress {self.tailscale_ip}" not in sshd_config:
+                with open("/etc/ssh/sshd_config", "a") as f:
+                    f.write(f"\n# Tailscale only configuration\nListenAddress {self.tailscale_ip}\n")
 
             self.service_command("restart", "ssh", "sshd")
 
         self.log("Server lockdown completed", "SUCCESS")
+        self._save_state(server_locked_down=True)
 
-        # Different behavior based on access method
         if self.initial_access_method == "SSH":
             print(f"\n{Colors.FAIL}SSH CONNECTION WILL BE LOST IN 10 SECONDS!{Colors.ENDC}")
             print(f"{Colors.WARNING}Reconnect using Tailscale IP: {self.tailscale_ip}{Colors.ENDC}")
@@ -1115,40 +1151,42 @@ ListenAddress {self.tailscale_ip}
         return True
 
     def install_applications(self):
-        """Install OpenClaw and Chrome - shared logic for both scenarios"""
+        """Install OpenClaw and Chrome"""
         if self.gui_available:
             self.show_gui_progress("Installing Applications", "Installing OpenClaw and Google Chrome...")
 
-        # Install OpenClaw
         self.install_openclaw()
-        # Install Chrome
         self.install_chrome()
-        # Create shortcuts
         self.create_user_shortcuts()
 
     def install_openclaw(self):
         """Install OpenClaw AI assistant and run it as a systemd service"""
+        if self._step_done("openclaw_installed"):
+            self.log("OpenClaw already installed — skipping", "SUCCESS")
+            return
+
+        # Also check if the service is already running
+        result = self.run_command("systemctl is-active openclaw", check=False)
+        if result.stdout.strip() == "active":
+            self.log("OpenClaw service is already running — skipping", "SUCCESS")
+            self._save_state(openclaw_installed=True)
+            return
+
         print(f"\n{Colors.HEADER}=== OPENCLAW AI INSTALLATION ==={Colors.ENDC}")
         self.log("Installing OpenClaw AI...")
 
         install_user = self.rdp_username or "root"
 
-        # Run the official OpenClaw installer as the RDP user
         self.log(f"Running OpenClaw installer as {install_user}...")
         self.run_command(
             f"su - {install_user} -c 'curl -fsSL https://openclaw.ai/install.sh | bash'",
             capture_output=False
         )
 
-        # Locate the installed binary
-        result = self.run_command(
-            f"su - {install_user} -c 'which openclaw'",
-            check=False
-        )
+        result = self.run_command(f"su - {install_user} -c 'which openclaw'", check=False)
         if result.returncode == 0:
             openclaw_bin = result.stdout.strip()
         else:
-            # Fall back to common install locations
             candidates = [
                 f"/home/{install_user}/.local/bin/openclaw",
                 f"/home/{install_user}/.npm-global/bin/openclaw",
@@ -1161,7 +1199,6 @@ ListenAddress {self.tailscale_ip}
 
         self.log(f"OpenClaw binary found at: {openclaw_bin}", "SUCCESS")
 
-        # Create systemd service to run OpenClaw as the RDP user
         service_content = f"""\
 [Unit]
 Description=OpenClaw AI Assistant
@@ -1186,76 +1223,74 @@ WantedBy=multi-user.target
         self.service_command("start", "openclaw")
 
         self.log("OpenClaw service enabled and started", "SUCCESS")
+        self._save_state(openclaw_installed=True)
 
     def install_chrome(self):
         """Install Google Chrome"""
+        if self._step_done("chrome_installed"):
+            self.log("Chrome already installed — skipping", "SUCCESS")
+            return
+
         print(f"\n{Colors.HEADER}=== GOOGLE CHROME INSTALLATION ==={Colors.ENDC}")
         self.log("Installing Google Chrome...")
 
-        # Check if already installed
         result = self.run_command("dpkg -l | grep google-chrome", check=False)
         if result.returncode == 0:
             self.log("Google Chrome is already installed", "SUCCESS")
+            self._save_state(chrome_installed=True)
             return
 
         try:
-            # Download Chrome .deb package
             self.log("Downloading Chrome package...")
             self.run_command("wget -q -O /tmp/google-chrome-stable_current_amd64.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb")
-
-            # Install Chrome
-            self.log("Installing Chrome package...")
             self.run_command("apt install -y /tmp/google-chrome-stable_current_amd64.deb")
-
-            # Clean up
             self.run_command("rm -f /tmp/google-chrome-stable_current_amd64.deb")
 
         except subprocess.CalledProcessError:
-            # Fallback method using repository
             self.log("Fallback: Installing Chrome via repository...", "WARNING")
             self.run_command("wget -q -O /usr/share/keyrings/google-chrome.gpg https://dl.google.com/linux/linux_signing_key.pub")
             self.run_command('echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list')
             self.run_command("apt update")
             self.run_command("apt install -y google-chrome-stable")
 
-        # Verify installation
         result = self.run_command("google-chrome --version")
         self.log(f"Chrome installed: {result.stdout.strip()}", "SUCCESS")
+        self._save_state(chrome_installed=True)
 
     def create_user_shortcuts(self):
         """Create desktop shortcuts for regular users"""
+        if self._step_done("shortcuts_created"):
+            self.log("User shortcuts already created — skipping", "SUCCESS")
+            return
+
         print(f"\n{Colors.HEADER}=== CREATING USER SHORTCUTS ==={Colors.ENDC}")
 
-        user_dirs = []
-        for user_dir in Path("/home").iterdir():
-            if user_dir.is_dir() and user_dir.stat().st_uid >= 1000:
-                user_dirs.append(user_dir)
+        user_dirs = [
+            d for d in Path("/home").iterdir()
+            if d.is_dir() and d.stat().st_uid >= 1000
+        ]
 
         for user_dir in user_dirs:
             username = user_dir.name
             desktop_dir = user_dir / "Desktop"
             desktop_dir.mkdir(exist_ok=True)
 
-            shortcuts = [
-                "/usr/share/applications/google-chrome.desktop"
-            ]
-
-            for shortcut in shortcuts:
+            for shortcut in ["/usr/share/applications/google-chrome.desktop"]:
                 if Path(shortcut).exists():
                     shortcut_name = Path(shortcut).name
                     user_shortcut = desktop_dir / shortcut_name
                     self.run_command(f"cp {shortcut} {user_shortcut}")
                     self.run_command(f"chown {username}:{username} {user_shortcut}")
                     self.run_command(f"chmod +x {user_shortcut}")
-
                     self.log(f"Created {shortcut_name} shortcut for {username}", "SUCCESS")
 
-        # Ensure XFCE recognises the Desktop directory for the RDP user
         if self.rdp_username:
             self.run_command(
                 f"su - {self.rdp_username} -c 'xdg-user-dirs-update'",
                 check=False
             )
+
+        self._save_state(shortcuts_created=True)
 
     def create_final_report(self):
         """Create final setup report"""
@@ -1265,7 +1300,7 @@ WantedBy=multi-user.target
             tailscale_result = self.run_command("tailscale ip -4")
             tailscale_ip = tailscale_result.stdout.strip()
         except:
-            tailscale_ip = "Not available"
+            tailscale_ip = self.tailscale_ip or "Not available"
 
         try:
             chrome_result = self.run_command("google-chrome --version")
@@ -1278,6 +1313,7 @@ WantedBy=multi-user.target
             openclaw_status = "Running" if openclaw_result.stdout.strip() == "active" else "Installed (service not active)"
         except:
             openclaw_status = "Installation failed"
+
         rdp_user = self.rdp_username or "your-rdp-user"
 
         report = f"""
@@ -1295,7 +1331,7 @@ WantedBy=multi-user.target
 • Security: Locked down to Tailscale-only access
 
 {Colors.BOLD}Applications Installed:{Colors.ENDC}
-• OpenClaw Game Engine: {openclaw_status}
+• OpenClaw AI: {openclaw_status}
 • Google Chrome: {chrome_version}
 • Desktop shortcuts created for all users
 
@@ -1312,7 +1348,6 @@ WantedBy=multi-user.target
 {Colors.GREEN}Setup completed successfully!{Colors.ENDC}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
-
         print(report)
 
         if self.gui_available and self.initial_access_method == "RDP":
@@ -1332,22 +1367,28 @@ WantedBy=multi-user.target
             except:
                 pass
 
-        # Save log
         with open("/var/log/universal_vps_setup.log", "w") as f:
             f.write("Universal VPS Setup Log\n")
             f.write("=" * 50 + "\n\n")
             f.write(f"Initial Access Method: {self.initial_access_method}\n")
-            f.write(f"Desktop Environment: {'Yes' if self.is_desktop_env else 'No'}\n")
             f.write(f"Desktop Type: {self.desktop_type}\n")
             f.write(f"RDP User: {rdp_user}\n")
-            f.write(f"GUI Available: {'Yes' if self.gui_available else 'No'}\n\n")
+            f.write(f"Tailscale IP: {tailscale_ip}\n\n")
             for entry in self.setup_log:
                 f.write(entry + "\n")
+
+    # ── Orchestrator ──────────────────────────────────────────────────────────
 
     def run_setup(self):
         """Main setup orchestrator - handles both SSH and RDP scenarios"""
         try:
             self.show_startup_message()
+
+            # If lockdown already done for SSH users, nothing left to do in phase 1
+            if self._step_done("server_locked_down") and self.initial_access_method == "SSH":
+                print(f"\n{Colors.GREEN}Phase 1 already complete.{Colors.ENDC}")
+                print(f"{Colors.WARNING}Reconnect via Tailscale ({self.tailscale_ip}) and run post_lockdown_setup.py{Colors.ENDC}")
+                return
 
             response = self.get_user_input(
                 "Ready to begin VPS setup?",
@@ -1355,7 +1396,7 @@ WantedBy=multi-user.target
                 default_index=0
             )
 
-            if response == 1:  # Exit
+            if response == 1:
                 self.log("Setup cancelled by user", "WARNING")
                 sys.exit(0)
 
@@ -1369,13 +1410,11 @@ WantedBy=multi-user.target
             if self.configure_tailscale():
                 if self.test_tailscale_connection():
                     if self.lockdown_server():
-                        # For SSH users, stop here — they must reconnect via Tailscale
                         if self.initial_access_method == "SSH":
                             print(f"\n{Colors.GREEN}Phase 1 Complete!{Colors.ENDC}")
                             print(f"{Colors.WARNING}Reconnect via Tailscale and run post_lockdown_setup.py{Colors.ENDC}")
                             return
 
-                        # For RDP users, continue with application installation
                         elif self.initial_access_method == "RDP":
                             self.install_applications()
                             self.create_final_report()
@@ -1398,6 +1437,7 @@ WantedBy=multi-user.target
                 except:
                     pass
             sys.exit(1)
+
 
 def main():
     setup = UniversalVPSSetup()
