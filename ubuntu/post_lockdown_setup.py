@@ -251,6 +251,73 @@ WantedBy=multi-user.target
         result = self.run_command("google-chrome --version")
         self.log(f"Chrome installed: {result.stdout.strip()}", "SUCCESS")
 
+    def install_chrome_cleanup(self):
+        """Install a daily systemd timer to keep Chrome storage under 1GB"""
+        print(f"\n{Colors.HEADER}=== CHROME STORAGE CLEANUP ==={Colors.ENDC}")
+        self.log("Installing Chrome storage cleanup timer...")
+
+        install_user = self.get_install_user()
+        if not install_user:
+            self.log("No target user found — skipping Chrome cleanup", "WARNING")
+            return
+
+        home_dir = f"/home/{install_user}"
+        chrome_dir = f"{home_dir}/.config/google-chrome"
+
+        cleanup_script = f"""\
+#!/bin/bash
+# Chrome storage cleanup — trims safe cache dirs when total exceeds 1GB
+CHROME_DIR="{chrome_dir}"
+MAX_KB=1048576
+
+[ -d "$CHROME_DIR" ] || exit 0
+
+current=$(du -sk "$CHROME_DIR" 2>/dev/null | cut -f1)
+if [ "$current" -gt "$MAX_KB" ]; then
+    rm -rf "$CHROME_DIR/BrowserMetrics"
+    find "$CHROME_DIR" -mindepth 2 -maxdepth 2 -type d \\( \\
+        -name "Cache" -o \\
+        -name "Code Cache" -o \\
+        -name "GPUCache" \\
+    \\) -exec rm -rf {{}}/* \\;
+    new=$(du -sk "$CHROME_DIR" 2>/dev/null | cut -f1)
+    echo "Chrome cleanup: $((current/1024))MB -> $((new/1024))MB"
+fi
+"""
+        with open("/usr/local/bin/chrome-cleanup", "w") as f:
+            f.write(cleanup_script)
+        os.chmod("/usr/local/bin/chrome-cleanup", 0o755)
+
+        service_content = f"""\
+[Unit]
+Description=Chrome Storage Cleanup
+
+[Service]
+Type=oneshot
+User={install_user}
+ExecStart=/usr/local/bin/chrome-cleanup
+"""
+        timer_content = """\
+[Unit]
+Description=Chrome Storage Cleanup Timer
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+        with open("/etc/systemd/system/chrome-cleanup.service", "w") as f:
+            f.write(service_content)
+        with open("/etc/systemd/system/chrome-cleanup.timer", "w") as f:
+            f.write(timer_content)
+
+        self.run_command("systemctl daemon-reload")
+        self.run_command("systemctl enable chrome-cleanup.timer")
+        self.run_command("systemctl start chrome-cleanup.timer")
+        self.log("Chrome cleanup timer enabled (runs daily)", "SUCCESS")
+
     def create_user_shortcuts(self):
         """Create desktop shortcuts for regular users"""
         print(f"\n{Colors.HEADER}=== CREATING USER SHORTCUTS ==={Colors.ENDC}")
@@ -371,6 +438,7 @@ WantedBy=multi-user.target
             self.test_lockdown_status()
             self.install_openclaw()
             self.install_chrome()
+            self.install_chrome_cleanup()
             self.create_user_shortcuts()
             self.create_final_report()
             
