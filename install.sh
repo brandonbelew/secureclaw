@@ -162,27 +162,33 @@ main() {
 
 # For local development/testing
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    # If we're running locally, use local files instead of downloading
-    if [[ -f "universal_vps_setup.py" && -f "post_lockdown_setup.py" ]]; then
+    # Locate scripts — check current dir and ubuntu/ subdirectory
+    SCRIPT_DIR=""
+    if [[ -f "ubuntu/universal_vps_setup.py" && -f "ubuntu/post_lockdown_setup.py" ]]; then
+        SCRIPT_DIR="ubuntu"
+    elif [[ -f "universal_vps_setup.py" && -f "post_lockdown_setup.py" ]]; then
+        SCRIPT_DIR="."
+    fi
+
+    if [[ -n "$SCRIPT_DIR" ]]; then
         print_header
-        print_status "Using local scripts for development"
-        
+        print_status "Using local scripts from ./$SCRIPT_DIR/"
+
         check_root
         check_ubuntu
         install_python
-        
-        # Copy local files
-        cp universal_vps_setup.py /usr/local/bin/
-        cp post_lockdown_setup.py /usr/local/bin/
+
+        cp "$SCRIPT_DIR/universal_vps_setup.py" /usr/local/bin/
+        cp "$SCRIPT_DIR/post_lockdown_setup.py" /usr/local/bin/
         chmod +x /usr/local/bin/*.py
-        
+
         create_shortcuts
         show_usage
-        
+
         echo
         read -p "Would you like to start the setup now? (y/N): " -n 1 -r
         echo
-        
+
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             print_status "Starting VPS setup..."
             exec /usr/local/bin/vps-setup
