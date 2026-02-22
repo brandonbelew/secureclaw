@@ -204,18 +204,9 @@ main() {
     create_shortcuts
     show_complete
 
-    read -rp "$(echo -e "  ${BOLD}Start setup now?${RESET} (Y/n): ")" reply
+    echo -e "  ${GREEN}${BOLD}Starting setup wizard...${RESET}"
     echo
-
-    reply=${reply:-y}
-    if [[ "$reply" =~ ^[Yy]$ ]]; then
-        echo -e "  ${GREEN}${BOLD}Starting setup wizard...${RESET}"
-        echo
-        exec /usr/local/bin/vps-setup
-    else
-        echo -e "  ${YELLOW}Ready when you are.${RESET}  Run: ${BOLD}sudo vps-setup${RESET}"
-        echo
-    fi
+    exec /usr/local/bin/vps-setup
 }
 
 main
