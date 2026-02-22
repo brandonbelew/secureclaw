@@ -1354,7 +1354,11 @@ section "SSH (port 22)"
 ssh_listen=$(ss -tlnp 2>/dev/null | grep ':22 ')
 if [ -n "$ssh_listen" ]; then
     if echo "$ssh_listen" | grep -qE "0\.0\.0\.0:22|\*:22|:::22"; then
-        warn "SSH is listening on all interfaces — firewall must be active to protect this"
+        if [ "$FIX_UFW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
+            pass "SSH listening on all interfaces — access restricted by UFW to Tailscale subnet only"
+        else
+            warn "SSH is listening on all interfaces and UFW rules need attention (see Firewall section)"
+        fi
     else
         pass "SSH is bound to restricted interface only"
     fi
@@ -1404,42 +1408,69 @@ done
 
 # ── External Port Scan ────────────────────────────────────────────────────────
 section "External Port Scan"
-info "Fetching public IP..."
-public_ip=$(curl -s --max-time 5 ifconfig.me 2>/dev/null)
-[ -z "$public_ip" ] && public_ip=$(curl -s --max-time 5 api.ipify.org 2>/dev/null)
+info "Detecting public IPs..."
+public_ipv4=$(curl -s --max-time 5 -4 ifconfig.me 2>/dev/null || curl -s --max-time 5 -4 api.ipify.org 2>/dev/null)
+public_ipv6=$(curl -s --max-time 5 -6 ifconfig.me 2>/dev/null || curl -s --max-time 5 -6 api6.ipify.org 2>/dev/null)
 
-if [ -z "$public_ip" ]; then
+if [ -z "$public_ipv4" ] && [ -z "$public_ipv6" ]; then
     warn "Could not determine public IP — skipping external scan"
 else
-    info "Public IP: $public_ip"
-    info "Scanning from external server — this may take up to 30 seconds..."
+    [ -n "$public_ipv4" ] && info "IPv4: $public_ipv4"
+    [ -n "$public_ipv6" ] && info "IPv6: $public_ipv6"
+    info "Querying Shodan Internet DB for each address..."
+    info "(Note: Shodan data is cached — may lag recent firewall changes by hours or days)"
     echo
-    scan=$(curl -s --max-time 60 "https://api.hackertarget.com/nmap/?q=$public_ip" 2>/dev/null)
 
-    if echo "$scan" | grep -qi "error\|api count\|exceeded\|rate limit"; then
-        warn "HackerTarget API limit reached — try again in an hour"
-    elif [ -z "$scan" ]; then
-        warn "No response from external scanner"
-    else
+    scan_shodan() {
+        local ip="$1"
+        local result http_code
+        result=$(curl -s --max-time 10 -w "\n%{http_code}" "https://internetdb.shodan.io/$ip" 2>/dev/null)
+        http_code=$(echo "$result" | tail -1)
+        result=$(echo "$result" | head -n -1)
+
+        if [ "$http_code" = "404" ] || echo "$result" | grep -q "No information available"; then
+            pass "$ip — not in Shodan index (normal for new servers)"
+            return
+        fi
+
+        if [ -z "$result" ]; then
+            warn "$ip — no response from Shodan"
+            return
+        fi
+
+        open_ports=$(echo "$result" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(' '.join(str(p) for p in d.get('ports', [])))
+except Exception:
+    pass
+" 2>/dev/null)
+
+        if [ -z "$open_ports" ]; then
+            pass "$ip — no open ports found by Shodan"
+            return
+        fi
+
+        info "$ip — Shodan sees open ports: $open_ports"
+        port_issue=0
         for port in 22 3389; do
-            if echo "$scan" | grep -qE "^${port}/[^ ]+ +open"; then
-                fail "Port $port is OPEN from the internet!"
+            if echo " $open_ports " | grep -qw "$port"; then
+                fail "Port $port is visible on $ip from the internet!"; port_issue=1
             else
-                pass "Port $port is closed/filtered from internet"
+                pass "Port $port not visible on $ip from internet"
             fi
         done
+        for port in $open_ports; do
+            case "$port" in
+                22|3389|80|443) ;;
+                *) warn "Unexpected port $port open on $ip — investigate if unknown" ;;
+            esac
+        done
+    }
 
-        other=$(echo "$scan" | grep -E "/[^ ]+ +open" | grep -vE "^22/|^3389/")
-        if [ -n "$other" ]; then
-            warn "Other open ports detected from internet:"
-            echo "$other" | while read -r line; do
-                echo -e "    ${YELLOW}→ $line${RESET}"
-            done
-            ISSUES=$((ISSUES+1))
-        else
-            pass "No unexpected ports open from internet"
-        fi
-    fi
+    [ -n "$public_ipv4" ] && scan_shodan "$public_ipv4"
+    [ -n "$public_ipv6" ] && scan_shodan "$public_ipv6"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
