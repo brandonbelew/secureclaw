@@ -42,20 +42,29 @@ class UniversalVPSSetup:
 
     def detect_desktop_environment(self):
         """Detect if we're running in a desktop environment"""
+        # DISPLAY is deliberately excluded — SSH X11 forwarding sets it on
+        # headless servers and produces false positives
         desktop_indicators = [
             'DESKTOP_SESSION',
             'GDMSESSION',
             'XDG_CURRENT_DESKTOP',
-            'DISPLAY'
         ]
 
         for indicator in desktop_indicators:
             if os.environ.get(indicator):
                 return True
 
-        # Check if X11 or Wayland is running
-        if os.path.exists('/tmp/.X11-unix') or os.environ.get('WAYLAND_DISPLAY'):
+        if os.environ.get('WAYLAND_DISPLAY'):
             return True
+
+        # Only treat X11 unix sockets as proof of a running desktop —
+        # the directory itself can exist on bare Ubuntu without any X server
+        if os.path.exists('/tmp/.X11-unix'):
+            try:
+                if any(os.scandir('/tmp/.X11-unix')):
+                    return True
+            except Exception:
+                pass
 
         return False
 
@@ -79,15 +88,34 @@ class UniversalVPSSetup:
 
     def detect_access_method(self):
         """Detect how the user is accessing the system"""
-        ssh_client = os.environ.get('SSH_CLIENT')
-        ssh_connection = os.environ.get('SSH_CONNECTION')
-
-        if ssh_client or ssh_connection:
+        # Check current environment first
+        if os.environ.get('SSH_CLIENT') or os.environ.get('SSH_CONNECTION'):
             return "SSH"
-        elif self.is_desktop_env:
+
+        # sudo strips SSH_* vars — walk up the process tree to find them
+        try:
+            pid = os.getpid()
+            visited = set()
+            while pid > 1 and pid not in visited:
+                visited.add(pid)
+                try:
+                    with open(f'/proc/{pid}/environ', 'rb') as f:
+                        for var in f.read().split(b'\x00'):
+                            if var.startswith((b'SSH_CLIENT=', b'SSH_CONNECTION=')):
+                                return "SSH"
+                    with open(f'/proc/{pid}/status') as f:
+                        for line in f:
+                            if line.startswith('PPid:'):
+                                pid = int(line.split()[1])
+                                break
+                except (PermissionError, FileNotFoundError):
+                    break
+        except Exception:
+            pass
+
+        if self.is_desktop_env:
             return "RDP"
-        else:
-            return "CONSOLE"
+        return "CONSOLE"
 
     def log(self, message, level="INFO"):
         """Log messages with timestamps and optional GUI display"""
