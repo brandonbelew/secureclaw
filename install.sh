@@ -7,7 +7,7 @@ if [ ! -t 0 ]; then
     tmp=$(mktemp /tmp/secureclaw-install.XXXXXX.sh)
     cat > "$tmp"
     chmod +x "$tmp"
-    exec bash "$tmp" "$@"
+    exec bash "$tmp" "$@" </dev/tty
 fi
 
 set -e
