@@ -192,7 +192,7 @@ main() {
     echo
     echo -e "  Type ${YELLOW}${BOLD}INSTALL${RESET} to accept and continue, or anything else to cancel."
     echo
-    read -rp "  > " confirm
+    read -rp "  > " confirm < /dev/tty
     echo
     if [[ "$confirm" != "INSTALL" ]]; then
         echo -e "  ${YELLOW}Cancelled.${RESET} No changes were made to your server."
