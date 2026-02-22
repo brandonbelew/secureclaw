@@ -1161,6 +1161,7 @@ TAILSCALE TROUBLESHOOTING:
         self.install_openclaw()
         self.install_chrome()
         self.install_chrome_cleanup()
+        self.install_security_check()
         self.create_user_shortcuts()
 
     def install_openclaw(self):
@@ -1271,6 +1272,208 @@ WantedBy=multi-user.target
         result = self.run_command("google-chrome --version")
         self.log(f"Chrome installed: {result.stdout.strip()}", "SUCCESS")
         self._save_state(chrome_installed=True)
+
+    def install_security_check(self):
+        """Install the desktop security verification script"""
+        if self._step_done("security_check_installed"):
+            self.log("Security check already installed — skipping", "SUCCESS")
+            return
+
+        print(f"\n{Colors.HEADER}=== SECURITY CHECK TOOL ==={Colors.ENDC}")
+        self.log("Installing security check tool...")
+
+        script = r"""#!/bin/bash
+# SecureClaw Security Verification
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
+
+pass()    { echo -e "  ${GREEN}✓${RESET}  $1"; }
+fail()    { echo -e "  ${RED}✗  $1${RESET}"; ISSUES=$((ISSUES+1)); }
+warn()    { echo -e "  ${YELLOW}⚠${RESET}  $1"; }
+info()    { echo -e "  ${CYAN}ℹ${RESET}  $1"; }
+section() { echo -e "\n${BOLD}  ── $1${RESET}\n"; }
+
+ISSUES=0
+
+clear
+echo
+echo -e "${BOLD}  ╔══════════════════════════════════════════════════════════════╗${RESET}"
+echo -e "${BOLD}  ║        🦞  SecureClaw Security Verification                 ║${RESET}"
+echo -e "${BOLD}  ║        $(date '+%Y-%m-%d %H:%M:%S')                                 ║${RESET}"
+echo -e "${BOLD}  ╚══════════════════════════════════════════════════════════════╝${RESET}"
+
+# ── Firewall ──────────────────────────────────────────────────────────────────
+section "Firewall (UFW)"
+ufw_out=$(ufw status verbose 2>/dev/null)
+if echo "$ufw_out" | grep -q "Status: active"; then
+    pass "UFW is active"
+else
+    fail "UFW is NOT active — server is unprotected!"
+fi
+if echo "$ufw_out" | grep -q "tailscale0"; then
+    pass "Tailscale interface rules present"
+else
+    fail "Tailscale interface rules missing"
+fi
+if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*22|22.*100\.64\.0\.0/10"; then
+    pass "SSH (22) restricted to Tailscale subnet"
+else
+    fail "SSH (22) does not have a Tailscale-only rule"
+fi
+if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*3389|3389.*100\.64\.0\.0/10"; then
+    pass "RDP (3389) restricted to Tailscale subnet"
+else
+    fail "RDP (3389) does not have a Tailscale-only rule"
+fi
+
+# ── Tailscale ─────────────────────────────────────────────────────────────────
+section "Tailscale VPN"
+ts_ip=$(tailscale ip -4 2>/dev/null)
+if [ -n "$ts_ip" ]; then
+    pass "Connected — Tailscale IP: $ts_ip"
+else
+    fail "Tailscale is not connected!"
+fi
+
+# ── SSH ───────────────────────────────────────────────────────────────────────
+section "SSH (port 22)"
+ssh_listen=$(ss -tlnp 2>/dev/null | grep ':22 ')
+if [ -n "$ssh_listen" ]; then
+    if echo "$ssh_listen" | grep -qE "0\.0\.0\.0:22|\*:22|:::22"; then
+        warn "SSH is listening on all interfaces — firewall must be active to protect this"
+    else
+        pass "SSH is bound to restricted interface only"
+    fi
+else
+    warn "SSH does not appear to be listening"
+fi
+
+# ── RDP ───────────────────────────────────────────────────────────────────────
+section "RDP (port 3389)"
+rdp_listen=$(ss -tlnp 2>/dev/null | grep ':3389 ')
+if [ -n "$rdp_listen" ]; then
+    pass "XRDP is listening on port 3389"
+    info "Protected by UFW — only reachable via Tailscale (100.64.0.0/10)"
+else
+    warn "XRDP does not appear to be listening on 3389"
+fi
+
+# ── OpenClaw ──────────────────────────────────────────────────────────────────
+section "OpenClaw"
+if systemctl is-active --quiet openclaw; then
+    pass "OpenClaw service is running"
+    oc_ports=$(ss -tlnp 2>/dev/null | grep -i openclaw | awk '{print $4}' | sed 's/.*://' | sort -u)
+    if [ -n "$oc_ports" ]; then
+        for port in $oc_ports; do
+            if echo "$ufw_out" | grep -q "$port"; then
+                pass "OpenClaw port $port has an explicit UFW rule"
+            else
+                info "OpenClaw port $port — covered by UFW default deny incoming"
+            fi
+        done
+    else
+        info "OpenClaw does not expose a network port"
+    fi
+else
+    warn "OpenClaw service is not running"
+fi
+
+# ── Services ──────────────────────────────────────────────────────────────────
+section "Services"
+for svc in xrdp tailscaled openclaw chrome-cleanup.timer; do
+    if systemctl is-active --quiet "$svc"; then
+        pass "$svc is running"
+    else
+        warn "$svc is not active"
+    fi
+done
+
+# ── External Port Scan ────────────────────────────────────────────────────────
+section "External Port Scan"
+info "Fetching public IP..."
+public_ip=$(curl -s --max-time 5 ifconfig.me 2>/dev/null)
+[ -z "$public_ip" ] && public_ip=$(curl -s --max-time 5 api.ipify.org 2>/dev/null)
+
+if [ -z "$public_ip" ]; then
+    warn "Could not determine public IP — skipping external scan"
+else
+    info "Public IP: $public_ip"
+    info "Scanning from external server — this may take up to 30 seconds..."
+    echo
+    scan=$(curl -s --max-time 60 "https://api.hackertarget.com/nmap/?q=$public_ip" 2>/dev/null)
+
+    if echo "$scan" | grep -qi "error\|api count\|exceeded\|rate limit"; then
+        warn "HackerTarget API limit reached — try again in an hour"
+    elif [ -z "$scan" ]; then
+        warn "No response from external scanner"
+    else
+        for port in 22 3389; do
+            if echo "$scan" | grep -qE "^${port}/[^ ]+ +open"; then
+                fail "Port $port is OPEN from the internet!"
+            else
+                pass "Port $port is closed/filtered from internet"
+            fi
+        done
+
+        other=$(echo "$scan" | grep -E "/[^ ]+ +open" | grep -vE "^22/|^3389/")
+        if [ -n "$other" ]; then
+            warn "Other open ports detected from internet:"
+            echo "$other" | while read -r line; do
+                echo -e "    ${YELLOW}→ $line${RESET}"
+            done
+            ISSUES=$((ISSUES+1))
+        else
+            pass "No unexpected ports open from internet"
+        fi
+    fi
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+echo
+echo -e "  ${DIM}──────────────────────────────────────────────────────────────${RESET}"
+echo
+if [ "$ISSUES" -eq 0 ]; then
+    echo -e "  ${GREEN}${BOLD}  ✓  All checks passed — server is properly secured.${RESET}"
+else
+    echo -e "  ${RED}${BOLD}  ✗  $ISSUES issue(s) found — review the output above.${RESET}"
+fi
+echo
+read -rp "  Press Enter to close..."
+"""
+
+        with open("/usr/local/bin/security-check", "w") as f:
+            f.write(script)
+        os.chmod("/usr/local/bin/security-check", 0o755)
+        self.log("Security check script installed", "SUCCESS")
+
+        desktop_entry = """\
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Security Check
+Comment=Verify firewall and security settings
+Exec=xfce4-terminal --title="SecureClaw Security Check" -e /usr/local/bin/security-check
+Icon=security-high
+Terminal=false
+Categories=System;Security;
+"""
+        user_dirs = [
+            d for d in Path("/home").iterdir()
+            if d.is_dir() and d.stat().st_uid >= 1000
+        ]
+        for user_dir in user_dirs:
+            username = user_dir.name
+            desktop_dir = user_dir / "Desktop"
+            desktop_dir.mkdir(exist_ok=True)
+            shortcut_path = desktop_dir / "security-check.desktop"
+            with open(shortcut_path, "w") as f:
+                f.write(desktop_entry)
+            self.run_command(f"chown {username}:{username} {shortcut_path}")
+            self.run_command(f"chmod +x {shortcut_path}")
+            self.log(f"Created Security Check shortcut for {username}", "SUCCESS")
+
+        self._save_state(security_check_installed=True)
 
     def install_chrome_cleanup(self):
         """Install a daily systemd timer to keep Chrome storage under 1GB"""
