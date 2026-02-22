@@ -130,7 +130,7 @@ class PostLockdownSetup:
         self.run_command("apt install -y build-essential cmake git")
         self.run_command("apt install -y libsdl2-dev libsdl2-mixer-dev libsdl2-image-dev")
         self.run_command("apt install -y libsdl2-ttf-dev libtinyxml2-dev libzzip-dev")
-        self.run_command("apt install -y libpng-dev zlib1g-dev")
+        self.run_command("apt install -y libpng-dev zlib1g-dev timidity freepats")
         
         # Create installation directory
         install_dir = "/opt/openclaw"
