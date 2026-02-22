@@ -1190,21 +1190,28 @@ TAILSCALE TROUBLESHOOTING:
             capture_output=False
         )
 
-        result = self.run_command(f"su - {install_user} -c 'which openclaw'", check=False)
-        if result.returncode == 0:
-            openclaw_bin = result.stdout.strip()
-        else:
-            candidates = [
-                f"/home/{install_user}/.local/bin/openclaw",
-                f"/home/{install_user}/.npm-global/bin/openclaw",
-                "/usr/local/bin/openclaw",
-            ]
-            openclaw_bin = next((p for p in candidates if Path(p).exists()), None)
-            if not openclaw_bin:
-                self.log("Could not locate openclaw binary after installation", "ERROR")
-                raise FileNotFoundError("openclaw binary not found")
+        # Locate the installed binary — openclaw installs into npm's global
+        # bin dir which may not be on PATH in a non-interactive su session.
+        # Ask npm directly for the prefix, then construct the path.
+        npm_prefix_result = self.run_command(
+            f"su - {install_user} -c 'npm config get prefix'",
+            check=False
+        )
+        npm_prefix = npm_prefix_result.stdout.strip() if npm_prefix_result.returncode == 0 else f"/home/{install_user}/.npm-global"
+
+        candidates = [
+            f"{npm_prefix}/bin/openclaw",
+            f"/home/{install_user}/.npm-global/bin/openclaw",
+            f"/home/{install_user}/.local/bin/openclaw",
+            "/usr/local/bin/openclaw",
+        ]
+        openclaw_bin = next((p for p in candidates if Path(p).exists()), None)
+        if not openclaw_bin:
+            self.log("Could not locate openclaw binary after installation", "ERROR")
+            raise FileNotFoundError("openclaw binary not found")
 
         self.log(f"OpenClaw binary found at: {openclaw_bin}", "SUCCESS")
+        npm_bin_dir = str(Path(openclaw_bin).parent)
 
         service_content = f"""\
 [Unit]
@@ -1218,6 +1225,7 @@ ExecStart={openclaw_bin}
 Restart=on-failure
 RestartSec=5
 Environment=HOME=/home/{install_user}
+Environment=PATH={npm_bin_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [Install]
 WantedBy=multi-user.target
