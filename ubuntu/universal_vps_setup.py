@@ -1125,15 +1125,26 @@ TAILSCALE TROUBLESHOOTING:
 
         self.log("Beginning server lockdown...")
 
+        # Explicitly enable IPv6 filtering before resetting rules —
+        # do not rely on the distro default being correct
+        self.run_command("sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw", check=False)
+        result = self.run_command("grep -c '^IPV6=' /etc/default/ufw", check=False)
+        if result.stdout.strip() == "0":
+            self.run_command("echo 'IPV6=yes' >> /etc/default/ufw")
+        self.log("UFW IPv6 filtering confirmed enabled")
+
         self.run_command("ufw --force reset")
         self.run_command("ufw default deny incoming")
         self.run_command("ufw default allow outgoing")
         self.run_command("ufw allow in on tailscale0")
         self.run_command("ufw allow out on tailscale0")
 
-        tailscale_subnet = "100.64.0.0/10"
-        self.run_command(f"ufw allow from {tailscale_subnet} to any port 22")
-        self.run_command(f"ufw allow from {tailscale_subnet} to any port 3389")
+        # Allow SSH and RDP from both Tailscale IPv4 CGNAT and IPv6 CGNAT ranges
+        tailscale_subnet_v4 = "100.64.0.0/10"
+        tailscale_subnet_v6 = "fd7a:115c:a1e0::/48"
+        for subnet in (tailscale_subnet_v4, tailscale_subnet_v6):
+            self.run_command(f"ufw allow from {subnet} to any port 22")
+            self.run_command(f"ufw allow from {subnet} to any port 3389")
         self.run_command("ufw --force enable")
 
         if self.tailscale_ip:
@@ -1331,6 +1342,7 @@ fix_err() { echo -e "    ${RED}✗  $1${RESET}"; }
 
 ISSUES=0
 FIX_UFW=0
+FIX_UFW6=0
 FIX_TS_RULE=0
 FIX_SSH_RULE=0
 FIX_RDP_RULE=0
@@ -1351,20 +1363,35 @@ if echo "$ufw_out" | grep -q "Status: active"; then
 else
     fail "UFW is NOT active — server is unprotected!"; FIX_UFW=1
 fi
+if grep -q "^IPV6=yes" /etc/default/ufw 2>/dev/null; then
+    pass "UFW IPv6 filtering is enabled"
+else
+    fail "UFW IPv6 filtering is disabled — IPv6 traffic may be unprotected!"; FIX_UFW6=1
+fi
 if echo "$ufw_out" | grep -q "tailscale0"; then
     pass "Tailscale interface rules present"
 else
     fail "Tailscale interface rules missing"; FIX_TS_RULE=1
 fi
 if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*22|22.*100\.64\.0\.0/10"; then
-    pass "SSH (22) restricted to Tailscale subnet"
+    pass "SSH (22) restricted to Tailscale IPv4 subnet"
 else
-    fail "SSH (22) does not have a Tailscale-only rule"; FIX_SSH_RULE=1
+    fail "SSH (22) does not have a Tailscale IPv4 rule"; FIX_SSH_RULE=1
+fi
+if echo "$ufw_out" | grep -qE "fd7a:115c:a1e0::/48.*22|22.*fd7a:115c:a1e0::/48"; then
+    pass "SSH (22) restricted to Tailscale IPv6 subnet"
+else
+    fail "SSH (22) does not have a Tailscale IPv6 rule"; FIX_SSH_RULE=1
 fi
 if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*3389|3389.*100\.64\.0\.0/10"; then
-    pass "RDP (3389) restricted to Tailscale subnet"
+    pass "RDP (3389) restricted to Tailscale IPv4 subnet"
 else
-    fail "RDP (3389) does not have a Tailscale-only rule"; FIX_RDP_RULE=1
+    fail "RDP (3389) does not have a Tailscale IPv4 rule"; FIX_RDP_RULE=1
+fi
+if echo "$ufw_out" | grep -qE "fd7a:115c:a1e0::/48.*3389|3389.*fd7a:115c:a1e0::/48"; then
+    pass "RDP (3389) restricted to Tailscale IPv6 subnet"
+else
+    fail "RDP (3389) does not have a Tailscale IPv6 rule"; FIX_RDP_RULE=1
 fi
 
 # ── Tailscale ─────────────────────────────────────────────────────────────────
@@ -1449,14 +1476,15 @@ echo -e "  ${RED}${BOLD}  ✗  $ISSUES issue(s) found — review the output abov
 echo
 
 # ── Auto-fix ──────────────────────────────────────────────────────────────────
-fixable=$((FIX_UFW + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
+fixable=$((FIX_UFW + FIX_UFW6 + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
 
 if [ "$fixable" -gt 0 ]; then
     echo -e "  ${CYAN}${BOLD}$fixable issue(s) can be fixed automatically:${RESET}"
     [ "$FIX_UFW"      -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW"
+    [ "$FIX_UFW6"     -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW IPv6 filtering"
     [ "$FIX_TS_RULE"  -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Add Tailscale interface rule"
-    [ "$FIX_SSH_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict SSH to Tailscale subnet"
-    [ "$FIX_RDP_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict RDP to Tailscale subnet"
+    [ "$FIX_SSH_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict SSH to Tailscale subnets (IPv4 + IPv6)"
+    [ "$FIX_RDP_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict RDP to Tailscale subnets (IPv4 + IPv6)"
     for svc in "${RESTART_SVCS[@]}"; do
         echo -e "    ${YELLOW}→${RESET}  Start and enable $svc"
     done
@@ -1475,6 +1503,14 @@ if [ "$fixable" -gt 0 ]; then
             ufw_changed=1
         fi
 
+        if [ "$FIX_UFW6" -eq 1 ]; then
+            echo -e "  → Enabling UFW IPv6 filtering..."
+            sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw
+            grep -q '^IPV6=' /etc/default/ufw || echo 'IPV6=yes' >> /etc/default/ufw
+            fix_ok "UFW IPv6 filtering enabled"
+            ufw_changed=1
+        fi
+
         if [ "$FIX_TS_RULE" -eq 1 ]; then
             echo -e "  → Adding Tailscale interface rules..."
             ufw allow in on tailscale0 && \
@@ -1484,21 +1520,23 @@ if [ "$fixable" -gt 0 ]; then
         fi
 
         if [ "$FIX_SSH_RULE" -eq 1 ]; then
-            echo -e "  → Restricting SSH to Tailscale subnet..."
+            echo -e "  → Restricting SSH to Tailscale subnets (IPv4 + IPv6)..."
             ufw delete allow 22/tcp  2>/dev/null || true
             ufw delete allow 22      2>/dev/null || true
             ufw delete allow OpenSSH 2>/dev/null || true
-            ufw allow from 100.64.0.0/10 to any port 22 proto tcp && \
-                fix_ok "SSH restricted to Tailscale" || fix_err "Failed to restrict SSH"
+            ufw allow from 100.64.0.0/10       to any port 22 proto tcp && \
+            ufw allow from fd7a:115c:a1e0::/48 to any port 22 proto tcp && \
+                fix_ok "SSH restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict SSH"
             ufw_changed=1
         fi
 
         if [ "$FIX_RDP_RULE" -eq 1 ]; then
-            echo -e "  → Restricting RDP to Tailscale subnet..."
+            echo -e "  → Restricting RDP to Tailscale subnets (IPv4 + IPv6)..."
             ufw delete allow 3389/tcp 2>/dev/null || true
             ufw delete allow 3389     2>/dev/null || true
-            ufw allow from 100.64.0.0/10 to any port 3389 proto tcp && \
-                fix_ok "RDP restricted to Tailscale" || fix_err "Failed to restrict RDP"
+            ufw allow from 100.64.0.0/10       to any port 3389 proto tcp && \
+            ufw allow from fd7a:115c:a1e0::/48 to any port 3389 proto tcp && \
+                fix_ok "RDP restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict RDP"
             ufw_changed=1
         fi
 
