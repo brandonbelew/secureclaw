@@ -1,15 +1,6 @@
 #!/bin/bash
 # Ubuntu VPS Setup Installer
 
-# If stdin is a pipe (e.g. wget | bash), save to a temp file and re-exec
-# so that interactive prompts can read from the terminal normally.
-if [ ! -t 0 ]; then
-    tmp=$(mktemp /tmp/secureclaw-install.XXXXXX.sh)
-    cat > "$tmp"
-    chmod +x "$tmp"
-    exec bash "$tmp" "$@" </dev/tty
-fi
-
 set -e
 
 # ── Colors ────────────────────────────────────────────────────────────────────
@@ -201,7 +192,7 @@ main() {
     echo
     echo -e "  Type ${YELLOW}${BOLD}INSTALL${RESET} to accept and continue, or anything else to cancel."
     echo
-    read -rp "  > " confirm < /dev/tty
+    read -rp "  > " confirm
     echo
     if [[ "$confirm" != "INSTALL" ]]; then
         echo -e "  ${YELLOW}Cancelled.${RESET} No changes were made to your server."
