@@ -1177,6 +1177,11 @@ TAILSCALE TROUBLESHOOTING:
 
         install_user = self.rdp_username or "root"
 
+        # Pre-install Node.js as root so the openclaw installer doesn't
+        # need to invoke sudo internally (which fails in a non-interactive su session)
+        self.log("Installing Node.js prerequisite...")
+        self.run_command("apt-get install -y nodejs npm", check=False)
+
         self.log(f"Running OpenClaw installer as {install_user}...")
         self.run_command(
             f"su - {install_user} -c 'curl -fsSL https://openclaw.ai/install.sh | bash'",
