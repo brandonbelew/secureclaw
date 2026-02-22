@@ -20,6 +20,7 @@ class Colors:
     FAIL = '\033[91m'
     ENDC = '\033[0m'
     BOLD = '\033[1m'
+    DIM = '\033[2m'
 
 class PostLockdownSetup:
     def __init__(self):
