@@ -391,7 +391,52 @@ class UniversalVPSSetup:
             [c for c in string.ascii_lowercase if c not in 'l'] +
             [c for c in string.digits if c not in '01']
         )
-        password = ''.join(secrets.choice(safe_chars) for _ in range(16))
+        generated_password = ''.join(secrets.choice(safe_chars) for _ in range(16))
+
+        # Show generated password and let user keep it or set their own
+        def show_cred_box(uname, pwd, extra_line=None):
+            box_width = max(44, len(uname) + 16, len(pwd) + 16)
+            inner = box_width - 2
+            sep = "═" * inner
+            def bl(content):
+                return f"║ {content:<{inner - 2}} ║"
+            lines = [
+                f"╔{sep}╗",
+                bl("RDP LOGIN CREDENTIALS"),
+                bl(""),
+                bl(f"  USERNAME: {uname}"),
+                bl(f"  PASSWORD: {pwd}"),
+                bl(""),
+            ]
+            if extra_line:
+                lines.append(bl(extra_line))
+            lines.append(f"╚{sep}╝")
+            print(f"\n{Colors.GREEN}{Colors.BOLD}" + "\n".join(lines) + f"{Colors.ENDC}\n")
+
+        show_cred_box(username, generated_password, "  Save this password before continuing!")
+
+        pwd_choice = self.get_user_input(
+            "Would you like to use this generated password or set your own?",
+            ["Use generated password", "Set my own password"],
+            default_index=0
+        )
+
+        if pwd_choice == 1:
+            # Let user set their own password (prompted twice to confirm)
+            while True:
+                pwd1 = getpass.getpass(f"\n{Colors.CYAN}Enter your password: {Colors.ENDC}")
+                if not pwd1:
+                    print(f"{Colors.WARNING}Password cannot be empty.{Colors.ENDC}")
+                    continue
+                pwd2 = getpass.getpass(f"{Colors.CYAN}Confirm your password: {Colors.ENDC}")
+                if pwd1 != pwd2:
+                    print(f"{Colors.WARNING}Passwords do not match. Try again.{Colors.ENDC}")
+                    continue
+                password = pwd1
+                break
+            show_cred_box(username, password, "  Save this password before continuing!")
+        else:
+            password = generated_password
 
         # Create user — try with 'input' group, retry without if the group is absent
         try:
@@ -418,23 +463,10 @@ class UniversalVPSSetup:
         self.run_command(f"chown {username}:{username} {xsession_path}")
         self.run_command(f"chmod 755 {xsession_path}")
 
-        # Display credentials in a prominent bordered box (always console + GUI if available)
-        box_width = max(42, len(username) + 16, len(password) + 16)
-        inner = box_width - 2
-        sep = "═" * inner
-
-        def box_line(content):
-            return f"║ {content:<{inner - 2}} ║"
-
-        cred_box = (
-            f"╔{sep}╗\n"
-            f"{box_line('RDP LOGIN CREDENTIALS')}\n"
-            f"{box_line(f'USERNAME: {username}')}\n"
-            f"{box_line(f'PASSWORD: {password}')}\n"
-            f"{box_line('SAVE THESE — needed to RDP in')}\n"
-            f"╚{sep}╝"
-        )
-        print(f"\n{Colors.GREEN}{Colors.BOLD}{cred_box}{Colors.ENDC}\n")
+        # Hold until user confirms they have saved their credentials
+        print(f"{Colors.WARNING}{Colors.BOLD}  Make sure you have saved your username and password!{Colors.ENDC}")
+        input(f"{Colors.CYAN}  Press Enter once you have saved your credentials to continue...{Colors.ENDC}")
+        print()
 
         if self.gui_available:
             try:
