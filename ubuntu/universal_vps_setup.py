@@ -1353,19 +1353,69 @@ WantedBy=timers.target
             if d.is_dir() and d.stat().st_uid >= 1000
         ]
 
+        url_shortcuts = [
+            {
+                "filename": "OC-Onboard-Docs.desktop",
+                "name": "OC Onboard Docs",
+                "url": "https://docs.openclaw.ai/cli/onboard",
+                "icon": "text-html",
+            },
+            {
+                "filename": "OC-Chrome-Extension.desktop",
+                "name": "OC Chrome Extension",
+                "url": "https://docs.openclaw.ai/tools/chrome-extension#chrome-extension",
+                "icon": "text-html",
+            },
+        ]
+
         for user_dir in user_dirs:
             username = user_dir.name
             desktop_dir = user_dir / "Desktop"
             desktop_dir.mkdir(exist_ok=True)
 
-            for shortcut in ["/usr/share/applications/google-chrome.desktop"]:
-                if Path(shortcut).exists():
-                    shortcut_name = Path(shortcut).name
-                    user_shortcut = desktop_dir / shortcut_name
-                    self.run_command(f"cp {shortcut} {user_shortcut}")
-                    self.run_command(f"chown {username}:{username} {user_shortcut}")
-                    self.run_command(f"chmod +x {user_shortcut}")
-                    self.log(f"Created {shortcut_name} shortcut for {username}", "SUCCESS")
+            # Chrome shortcut
+            chrome_desktop = "/usr/share/applications/google-chrome.desktop"
+            if Path(chrome_desktop).exists():
+                user_shortcut = desktop_dir / "google-chrome.desktop"
+                self.run_command(f"cp {chrome_desktop} {user_shortcut}")
+                self.run_command(f"chown {username}:{username} {user_shortcut}")
+                self.run_command(f"chmod +x {user_shortcut}")
+                self.log(f"Created google-chrome.desktop shortcut for {username}", "SUCCESS")
+
+            # URL shortcuts
+            for sc in url_shortcuts:
+                content = (
+                    f"[Desktop Entry]\n"
+                    f"Version=1.0\n"
+                    f"Type=Link\n"
+                    f"Name={sc['name']}\n"
+                    f"URL={sc['url']}\n"
+                    f"Icon={sc['icon']}\n"
+                )
+                shortcut_path = desktop_dir / sc["filename"]
+                with open(shortcut_path, "w") as f:
+                    f.write(content)
+                self.run_command(f"chown {username}:{username} {shortcut_path}")
+                self.run_command(f"chmod +x {shortcut_path}")
+                self.log(f"Created {sc['name']} shortcut for {username}", "SUCCESS")
+
+            # Enable hidden files in Thunar (XFCE file manager)
+            thunar_conf_dir = user_dir / ".config" / "Thunar"
+            thunar_conf_dir.mkdir(parents=True, exist_ok=True)
+            thunar_conf = thunar_conf_dir / "thunarrc"
+            existing = thunar_conf.read_text() if thunar_conf.exists() else ""
+            if "ShowHidden=" in existing:
+                existing = "\n".join(
+                    "ShowHidden=TRUE" if line.startswith("ShowHidden=") else line
+                    for line in existing.splitlines()
+                )
+                thunar_conf.write_text(existing)
+            elif "[Configuration]" in existing:
+                thunar_conf.write_text(existing.rstrip() + "\nShowHidden=TRUE\n")
+            else:
+                thunar_conf.write_text("[Configuration]\nShowHidden=TRUE\n")
+            self.run_command(f"chown -R {username}:{username} {thunar_conf_dir}")
+            self.log(f"Enabled hidden files in Thunar for {username}", "SUCCESS")
 
         if self.rdp_username:
             self.run_command(
