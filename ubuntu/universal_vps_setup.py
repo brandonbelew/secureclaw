@@ -755,27 +755,53 @@ lock-enabled=false
         """Interactive Tailscale configuration"""
         print(f"\n{Colors.HEADER}=== TAILSCALE CONFIGURATION ==={Colors.ENDC}")
 
-        message = ("Tailscale setup requires authentication with your Tailscale account.\n"
-                  "If you don't have an account, create one at https://tailscale.com")
+        print(f"""
+{Colors.BOLD}What is Tailscale?{Colors.ENDC}
+{Colors.CYAN}  Tailscale is a private VPN that connects your devices securely
+  over the internet. Once set up, you will use your Tailscale IP
+  address to RDP into this server from anywhere — no open ports,
+  no exposed firewall rules.
 
-        if self.gui_available and self.initial_access_method == "RDP":
-            try:
-                root = tk.Tk()
-                root.withdraw()
-                messagebox.showinfo("Tailscale Setup", message)
-                root.destroy()
-            except:
-                pass
+  Think of it as a private tunnel between your computer and this
+  server that nobody else can access.{Colors.ENDC}
 
-        print(f"{Colors.CYAN}{message}{Colors.ENDC}")
+{Colors.BOLD}Before you continue:{Colors.ENDC}
+{Colors.WARNING}  You need a free Tailscale account to proceed.
+  If you don't have one yet, create one now at:
+
+      https://tailscale.com
+
+  Sign up is free and takes about 2 minutes.
+  You can use Google, Microsoft, or GitHub to sign in.{Colors.ENDC}
+
+{Colors.BOLD}What happens next:{Colors.ENDC}
+{Colors.CYAN}  A link will appear in the terminal.
+  Open that link in your browser and sign in to your Tailscale
+  account to authorise this server. Once approved, setup continues
+  automatically.{Colors.ENDC}
+""")
 
         proceed = self.get_user_input(
-            "Ready to authenticate with Tailscale?",
-            ["Continue with authentication", "Skip Tailscale setup"],
+            "Do you have a Tailscale account and are ready to authenticate?",
+            ["Yes, I have an account — continue", "I need to create an account first", "Skip Tailscale setup"],
             default_index=0
         )
 
-        if proceed == 1:  # Skip
+        if proceed == 1:  # Needs to create account
+            print(f"\n{Colors.CYAN}  Go to {Colors.BOLD}https://tailscale.com{Colors.ENDC}{Colors.CYAN} and create your free account.{Colors.ENDC}")
+            print(f"{Colors.CYAN}  Come back and re-run this setup once your account is ready.{Colors.ENDC}\n")
+            input(f"{Colors.WARNING}  Press Enter once your account is created and you are ready to continue...{Colors.ENDC}")
+            # Re-ask now that they've had time to create an account
+            proceed = self.get_user_input(
+                "Ready to authenticate with Tailscale?",
+                ["Yes, authenticate now", "Skip Tailscale setup"],
+                default_index=0
+            )
+            if proceed == 1:
+                self.log("Tailscale setup skipped by user", "WARNING")
+                return False
+
+        if proceed == 2:  # Skip
             self.log("Tailscale setup skipped by user", "WARNING")
             return False
 
