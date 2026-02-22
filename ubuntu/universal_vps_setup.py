@@ -1046,7 +1046,10 @@ ListenAddress {self.tailscale_ip}
             with open("/etc/ssh/sshd_config", "a") as f:
                 f.write(ssh_config_addition)
 
-            self.run_command("systemctl restart sshd")
+            # Ubuntu uses ssh.service; other distros use sshd.service
+            result = self.run_command("systemctl restart ssh", check=False)
+            if result.returncode != 0:
+                self.run_command("systemctl restart sshd")
 
         self.log("Server lockdown completed", "SUCCESS")
 
