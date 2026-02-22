@@ -402,7 +402,7 @@ WantedBy=timers.target
 
 {Colors.CYAN}Next Steps:{Colors.ENDC}
 1. Connect via RDP: {tailscale_ip}:3389
-2. Open a terminal and run: {Colors.BOLD}openclaw{Colors.ENDC}
+2. Open a terminal and run: {Colors.BOLD}openclaw onboard{Colors.ENDC}
    {Colors.DIM}This completes the OpenClaw onboarding (API keys, preferences, etc.){Colors.ENDC}
 3. OpenClaw will then continue running as a background service automatically
 4. Google Chrome is available on your desktop
