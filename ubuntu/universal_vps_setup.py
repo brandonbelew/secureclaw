@@ -1177,36 +1177,39 @@ TAILSCALE TROUBLESHOOTING:
 
         install_user = self.rdp_username or "root"
 
-        # Pre-install Node.js v22+ as root (OpenClaw requires v22+).
-        # Installing here prevents the openclaw installer from trying to
-        # invoke sudo internally, which fails in a non-interactive su session.
+        # Install Node.js v22+ via NodeSource as root
         self.log("Installing Node.js v22 prerequisite...")
         self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
         self.run_command("apt-get install -y nodejs")
 
-        self.log(f"Running OpenClaw installer as {install_user}...")
-        self.run_command(
-            f"su - {install_user} -c 'curl -fsSL https://openclaw.ai/install.sh | bash'",
-            capture_output=False
-        )
+        # The openclaw.ai installer script requires an interactive TTY (it uses
+        # gum for UI and npm has TTY requirements) which we don't have in a su
+        # subprocess. Install openclaw directly via npm instead.
+        npm_global = f"/home/{install_user}/.npm-global"
 
-        # Locate the installed binary — openclaw installs into npm's global
-        # bin dir which may not be on PATH in a non-interactive su session.
-        # Ask npm directly for the prefix, then construct the path.
-        npm_prefix_result = self.run_command(
-            f"su - {install_user} -c 'npm config get prefix'",
+        # Create the npm global directory as root and hand it to the user
+        self.run_command(f"mkdir -p {npm_global}/lib {npm_global}/bin")
+        self.run_command(f"chown -R {install_user}:{install_user} {npm_global}")
+
+        # Point npm at our pre-created directory
+        self.run_command(f"su - {install_user} -c 'npm config set prefix {npm_global}'")
+
+        # Install openclaw — try latest, fall back to next
+        self.log("Installing OpenClaw via npm...")
+        result = self.run_command(
+            f"su - {install_user} -c 'npm install -g openclaw@latest'",
+            capture_output=False,
             check=False
         )
-        npm_prefix = npm_prefix_result.stdout.strip() if npm_prefix_result.returncode == 0 else f"/home/{install_user}/.npm-global"
+        if result.returncode != 0:
+            self.log("openclaw@latest failed, trying @next...", "WARNING")
+            self.run_command(
+                f"su - {install_user} -c 'npm install -g openclaw@next'",
+                capture_output=False
+            )
 
-        candidates = [
-            f"{npm_prefix}/bin/openclaw",
-            f"/home/{install_user}/.npm-global/bin/openclaw",
-            f"/home/{install_user}/.local/bin/openclaw",
-            "/usr/local/bin/openclaw",
-        ]
-        openclaw_bin = next((p for p in candidates if Path(p).exists()), None)
-        if not openclaw_bin:
+        openclaw_bin = f"{npm_global}/bin/openclaw"
+        if not Path(openclaw_bin).exists():
             self.log("Could not locate openclaw binary after installation", "ERROR")
             raise FileNotFoundError("openclaw binary not found")
 
