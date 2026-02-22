@@ -20,10 +20,18 @@ print_banner() {
     echo
     echo -e "${BLUE}${BOLD}  ╔══════════════════════════════════════════════════════════════╗${RESET}"
     echo -e "${BLUE}${BOLD}  ║                                                              ║${RESET}"
-    echo -e "${BLUE}${BOLD}  ║           🖥️   VPS SETUP INSTALLER                           ║${RESET}"
-    echo -e "${BLUE}${BOLD}  ║         Secure Remote Desktop Environment                   ║${RESET}"
+    echo -e "${BLUE}${BOLD}  ║           🦞  SecureClaw Setup Installer                     ║${RESET}"
+    echo -e "${BLUE}${BOLD}  ║           Secure Remote Desktop Environment                 ║${RESET}"
+    echo -e "${BLUE}${BOLD}  ║                                By: Brandon Belew            ║${RESET}"
     echo -e "${BLUE}${BOLD}  ║                                                              ║${RESET}"
     echo -e "${BLUE}${BOLD}  ╚══════════════════════════════════════════════════════════════╝${RESET}"
+    echo
+    echo -e "  ${YELLOW}${BOLD}  ⚠  WARNING${RESET}"
+    echo -e "  ${YELLOW}  This script is intended for use on a fresh virtual private server only.${RESET}"
+    echo -e "  ${YELLOW}  It will modify firewall policies and system configuration in ways that${RESET}"
+    echo -e "  ${YELLOW}  may lock you out or require a full server reinstall if something goes${RESET}"
+    echo -e "  ${YELLOW}  wrong. By continuing, you accept all responsibility for any data loss${RESET}"
+    echo -e "  ${YELLOW}  or damages. Proceed only if you know what you are doing.${RESET}"
     echo
 }
 
