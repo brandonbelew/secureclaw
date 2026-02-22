@@ -143,10 +143,12 @@ class PostLockdownSetup:
             self.log("Skipping OpenClaw install — no target user found", "WARNING")
             return
 
-        # Pre-install Node.js as root so the openclaw installer doesn't
-        # need to invoke sudo internally (which fails in a non-interactive su session)
-        self.log("Installing Node.js prerequisite...")
-        self.run_command("apt-get install -y nodejs npm", check=False)
+        # Pre-install Node.js v22+ as root (OpenClaw requires v22+).
+        # Installing here prevents the openclaw installer from trying to
+        # invoke sudo internally, which fails in a non-interactive su session.
+        self.log("Installing Node.js v22 prerequisite...")
+        self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
+        self.run_command("apt-get install -y nodejs")
 
         # Run the official OpenClaw installer as the target user
         self.log(f"Running OpenClaw installer as {install_user}...")
