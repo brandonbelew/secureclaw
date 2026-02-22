@@ -103,7 +103,7 @@ install_scripts() {
         chmod +x /usr/local/bin/post_lockdown_setup.py
     else
         # Repo not available locally — download from GitHub
-        REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secure-vps/main"
+        REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/main"
         if command -v curl &> /dev/null; then
             curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py" -o /usr/local/bin/universal_vps_setup.py
             curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py" -o /usr/local/bin/post_lockdown_setup.py
