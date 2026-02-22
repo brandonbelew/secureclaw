@@ -32,6 +32,7 @@ class Colors:
     FAIL = '\033[91m'
     ENDC = '\033[0m'
     BOLD = '\033[1m'
+    DIM = '\033[2m'
 
 class UniversalVPSSetup:
     def __init__(self):
@@ -270,10 +271,37 @@ class UniversalVPSSetup:
             print("  • Script will install and configure RDP server")
             print("  • You'll test RDP before server lockdown")
 
-        print(f"\n{Colors.WARNING}Important Notes:{Colors.ENDC}")
-        print("  • This script requires root privileges")
-        print("  • Your server will be locked down to Tailscale-only access")
-        print("  • Have your Tailscale account ready (free at tailscale.com)")
+        print(f"\n{Colors.CYAN}{Colors.BOLD}  Security Architecture{Colors.ENDC}")
+        print(f"  {Colors.DIM}──────────────────────────────────────────────────────────────{Colors.ENDC}")
+        print(f"  This setup hardens your VPS using two complementary layers of")
+        print(f"  network security — but it is not a complete security solution")
+        print(f"  on its own. Understanding what it does and does not cover is")
+        print(f"  important.")
+        print()
+        print(f"  {Colors.BOLD}Tailscale VPN{Colors.ENDC}")
+        print(f"  All remote access (SSH and RDP) is routed exclusively through")
+        print(f"  Tailscale — a zero-config VPN built on the WireGuard protocol.")
+        print(f"  Tailscale is SOC 2 Type II certified, end-to-end encrypted,")
+        print(f"  and participates in regular independent third-party security")
+        print(f"  audits. Direct public internet access to SSH and RDP is blocked.")
+        print()
+        print(f"  {Colors.BOLD}UFW Firewall{Colors.ENDC}")
+        print(f"  Ubuntu's firewall is configured to deny all inbound connections")
+        print(f"  by default, with access permitted only from the Tailscale subnet")
+        print(f"  (100.64.0.0/10). This eliminates direct internet exposure of")
+        print(f"  your remote access services.")
+        print()
+        print(f"  {Colors.WARNING}These controls substantially reduce your attack surface, but")
+        print(f"  defense in depth still matters. We strongly recommend:{Colors.ENDC}")
+        print(f"  {Colors.BOLD}•{Colors.ENDC}  Use a strong, unique password for your RDP account")
+        print(f"  {Colors.BOLD}•{Colors.ENDC}  Enable multi-factor authentication on your Tailscale account")
+        print(f"     {Colors.DIM}tailscale.com → Settings → Two-factor authentication{Colors.ENDC}")
+        print(f"  {Colors.BOLD}•{Colors.ENDC}  Periodically run the Security Check tool (desktop shortcut)")
+        print(f"     {Colors.DIM}to verify firewall rules are still intact{Colors.ENDC}")
+        print(f"  {Colors.BOLD}•{Colors.ENDC}  Keep your server patched:  sudo apt upgrade")
+        print(f"  {Colors.DIM}──────────────────────────────────────────────────────────────{Colors.ENDC}")
+        print(f"\n  {Colors.WARNING}Note:{Colors.ENDC}  Have a Tailscale account ready before continuing.")
+        print(f"        Create a free account at tailscale.com if you don't have one.")
 
     def show_gui_progress(self, title, message):
         """Show a progress window for long-running operations"""

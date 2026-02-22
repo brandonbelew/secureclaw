@@ -691,10 +691,20 @@ WantedBy=timers.target
 • Shortcuts created on user desktops
 • Accessible via RDP connection
 
-{Colors.WARNING}Important Security Notes:{Colors.ENDC}
-• Server is locked down to Tailscale network only
-• No direct internet access for RDP/SSH
-• All connections must go through Tailscale VPN
+{Colors.WARNING}Security Notes:{Colors.ENDC}
+Your server is hardened using Tailscale VPN and UFW firewall rules that
+restrict SSH and RDP to the Tailscale subnet only. Tailscale is SOC 2
+Type II certified, end-to-end encrypted, and independently audited.
+
+This configuration significantly reduces your attack surface, but it is
+not a substitute for good security practices:
+
+  {Colors.BOLD}•{Colors.ENDC}  Use a strong, unique password for your RDP account
+  {Colors.BOLD}•{Colors.ENDC}  Enable multi-factor authentication on Tailscale
+     {Colors.DIM}tailscale.com → Settings → Two-factor authentication{Colors.ENDC}
+  {Colors.BOLD}•{Colors.ENDC}  Run the Security Check tool periodically (desktop shortcut)
+     {Colors.DIM}to verify firewall rules remain intact{Colors.ENDC}
+  {Colors.BOLD}•{Colors.ENDC}  Keep your server patched:  sudo apt upgrade
 
 {Colors.CYAN}Next Steps:{Colors.ENDC}
 1. Connect via RDP: {tailscale_ip}:3389
