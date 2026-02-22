@@ -34,11 +34,43 @@ class UniversalVPSSetup:
     def __init__(self):
         self.tailscale_ip = None
         self.setup_log = []
+        self.os_info = self._detect_os_info()
         self.is_desktop_env = self.detect_desktop_environment()
         self.gui_available = self.is_desktop_env and self.check_display()
         self.initial_access_method = self.detect_access_method()
         self.desktop_type = None     # set by detect_and_setup_desktop()
         self.rdp_username = None     # set by create_rdp_user()
+
+    def _detect_os_info(self):
+        """Read /etc/os-release and return a dict of OS metadata"""
+        info = {}
+        try:
+            with open("/etc/os-release") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line:
+                        k, _, v = line.partition("=")
+                        info[k] = v.strip('"')
+        except Exception:
+            pass
+        return info
+
+    def find_service(self, *candidates):
+        """Return the first service name that exists on this system.
+        Falls back to the first candidate if none are found."""
+        for name in candidates:
+            result = subprocess.run(
+                f"systemctl list-unit-files {name}.service 2>/dev/null | grep -q {name}",
+                shell=True, capture_output=True
+            )
+            if result.returncode == 0:
+                return name
+        return candidates[0]
+
+    def service_command(self, action, *candidates):
+        """Run a systemctl action against the first matching service name"""
+        service = self.find_service(*candidates)
+        self.run_command(f"systemctl {action} {service}")
 
     def detect_desktop_environment(self):
         """Detect if we're running in a desktop environment"""
@@ -156,7 +188,9 @@ class UniversalVPSSetup:
         print("=" * 70)
         print(f"{Colors.ENDC}")
 
+        os_name = self.os_info.get("PRETTY_NAME", "Unknown OS")
         print(f"{Colors.CYAN}Detected Environment:{Colors.ENDC}")
+        print(f"  • OS: {Colors.BOLD}{os_name}{Colors.ENDC}")
         print(f"  • Access Method: {Colors.BOLD}{self.initial_access_method}{Colors.ENDC}")
         print(f"  • Desktop Environment: {Colors.BOLD}{'Yes' if self.is_desktop_env else 'No'}{Colors.ENDC}")
         print(f"  • GUI Available: {Colors.BOLD}{'Yes' if self.gui_available else 'No'}{Colors.ENDC}")
@@ -317,7 +351,8 @@ class UniversalVPSSetup:
             with open("/etc/lightdm/lightdm.conf", "w") as f:
                 f.write("[Seat:*]\nWaylandEnable=false\nuser-session=xfce\n")
 
-            self.run_command("systemctl enable lightdm xrdp")
+            self.service_command("enable", "lightdm")
+            self.service_command("enable", "xrdp")
             detected = "xfce"
             self.log("XFCE desktop environment installed", "SUCCESS")
         else:
@@ -328,7 +363,7 @@ class UniversalVPSSetup:
             if result.returncode != 0:
                 self.log("xrdp not found on existing desktop — installing xrdp only...", "WARNING")
                 self.run_command("apt install -y xrdp", capture_output=False)
-                self.run_command("systemctl enable xrdp")
+                self.service_command("enable", "xrdp")
 
         self.desktop_type = detected
         self.log(f"Desktop type set to: {self.desktop_type}", "SUCCESS")
@@ -561,7 +596,7 @@ code=20
         self.log(f"Changes applied: {', '.join(changes_made)}", "SUCCESS")
 
         if needs_xrdp_restart:
-            self.run_command("systemctl enable xrdp")
+            self.service_command("enable", "xrdp")
 
             if self.initial_access_method == "RDP":
                 warning = (
@@ -584,7 +619,7 @@ code=20
                 print(f"{Colors.WARNING}{'=' * 60}{Colors.ENDC}")
                 time.sleep(5)
 
-            self.run_command("systemctl restart xrdp")
+            self.service_command("restart", "xrdp")
             self.log("xrdp restarted with persistence configuration", "SUCCESS")
 
     def _configure_xfce_persistence(self):
@@ -1046,10 +1081,7 @@ ListenAddress {self.tailscale_ip}
             with open("/etc/ssh/sshd_config", "a") as f:
                 f.write(ssh_config_addition)
 
-            # Ubuntu uses ssh.service; other distros use sshd.service
-            result = self.run_command("systemctl restart ssh", check=False)
-            if result.returncode != 0:
-                self.run_command("systemctl restart sshd")
+            self.service_command("restart", "ssh", "sshd")
 
         self.log("Server lockdown completed", "SUCCESS")
 
@@ -1150,8 +1182,8 @@ WantedBy=multi-user.target
             f.write(service_content)
 
         self.run_command("systemctl daemon-reload")
-        self.run_command("systemctl enable openclaw")
-        self.run_command("systemctl start openclaw")
+        self.service_command("enable", "openclaw")
+        self.service_command("start", "openclaw")
 
         self.log("OpenClaw service enabled and started", "SUCCESS")
 
