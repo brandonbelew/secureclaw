@@ -114,81 +114,87 @@ class PostLockdownSetup:
         except:
             self.log("Could not verify SSH configuration", "WARNING")
 
+    def get_install_user(self):
+        """Find the primary non-root user to install OpenClaw for"""
+        users = [
+            d.name for d in Path("/home").iterdir()
+            if d.is_dir() and d.stat().st_uid >= 1000
+        ]
+        if len(users) == 1:
+            return users[0]
+        elif len(users) > 1:
+            print(f"\n{Colors.CYAN}Multiple users found: {', '.join(users)}{Colors.ENDC}")
+            while True:
+                choice = input("Enter username to install OpenClaw for: ").strip()
+                if choice in users:
+                    return choice
+                print(f"{Colors.WARNING}Invalid choice. Options: {', '.join(users)}{Colors.ENDC}")
+        else:
+            self.log("No regular user found in /home", "ERROR")
+            return None
+
     def install_openclaw(self):
-        """Install OpenClaw game engine"""
-        print(f"\n{Colors.HEADER}=== OPENCLAW INSTALLATION ==={Colors.ENDC}")
-        self.log("Installing OpenClaw...")
-        
-        # Check if already installed
-        if Path("/opt/openclaw").exists():
-            self.log("OpenClaw directory already exists, removing...", "WARNING")
-            self.run_command("rm -rf /opt/openclaw")
-        
-        # Install dependencies
-        self.log("Installing build dependencies...")
-        self.run_command("apt update")
-        self.run_command("apt install -y build-essential cmake git")
-        self.run_command("apt install -y libsdl2-dev libsdl2-mixer-dev libsdl2-image-dev")
-        self.run_command("apt install -y libsdl2-ttf-dev libtinyxml2-dev libzzip-dev")
-        self.run_command("apt install -y libpng-dev zlib1g-dev timidity freepats")
-        
-        # Create installation directory
-        install_dir = "/opt/openclaw"
-        self.run_command(f"mkdir -p {install_dir}")
-        
-        # Clone OpenClaw repository
-        self.log("Cloning OpenClaw repository...")
-        self.run_command(f"git clone https://github.com/pjasicek/OpenClaw.git {install_dir}")
-        
-        # Build OpenClaw
-        self.log("Building OpenClaw (this may take several minutes)...")
-        build_dir = f"{install_dir}/Build_Release"
-        self.run_command(f"mkdir -p {build_dir}")
-        
-        # Change to build directory and compile
-        original_dir = os.getcwd()
-        try:
-            os.chdir(build_dir)
-            self.run_command("cmake -DCMAKE_BUILD_TYPE=Release ..", capture_output=False)
-            self.run_command("make -j$(nproc)", capture_output=False)
-            
-            # Make executable accessible
-            self.run_command(f"chmod +x {build_dir}/openclaw")
-            
-        finally:
-            os.chdir(original_dir)
-        
-        # Create launcher script
-        launcher_script = f"""#!/bin/bash
-cd {build_dir}
-./openclaw "$@"
+        """Install OpenClaw AI assistant and run it as a systemd service"""
+        print(f"\n{Colors.HEADER}=== OPENCLAW AI INSTALLATION ==={Colors.ENDC}")
+        self.log("Installing OpenClaw AI...")
+
+        install_user = self.get_install_user()
+        if not install_user:
+            self.log("Skipping OpenClaw install — no target user found", "WARNING")
+            return
+
+        # Run the official OpenClaw installer as the target user
+        self.log(f"Running OpenClaw installer as {install_user}...")
+        self.run_command(
+            f"su - {install_user} -c 'curl -fsSL https://openclaw.ai/install.sh | bash'",
+            capture_output=False
+        )
+
+        # Locate the installed binary
+        result = self.run_command(
+            f"su - {install_user} -c 'which openclaw'",
+            check=False
+        )
+        if result.returncode == 0:
+            openclaw_bin = result.stdout.strip()
+        else:
+            candidates = [
+                f"/home/{install_user}/.local/bin/openclaw",
+                f"/home/{install_user}/.npm-global/bin/openclaw",
+                "/usr/local/bin/openclaw",
+            ]
+            openclaw_bin = next((p for p in candidates if Path(p).exists()), None)
+            if not openclaw_bin:
+                self.log("Could not locate openclaw binary after installation", "ERROR")
+                raise FileNotFoundError("openclaw binary not found")
+
+        self.log(f"OpenClaw binary found at: {openclaw_bin}", "SUCCESS")
+
+        # Create systemd service to run OpenClaw as the target user
+        service_content = f"""\
+[Unit]
+Description=OpenClaw AI Assistant
+After=network.target
+
+[Service]
+Type=simple
+User={install_user}
+ExecStart={openclaw_bin}
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/home/{install_user}
+
+[Install]
+WantedBy=multi-user.target
 """
-        
-        with open("/usr/local/bin/openclaw", "w") as f:
-            f.write(launcher_script)
-        
-        self.run_command("chmod +x /usr/local/bin/openclaw")
-        
-        # Create desktop entry
-        desktop_entry = f"""[Desktop Entry]
-Version=1.0
-Type=Application
-Name=OpenClaw
-Comment=Captain Claw Game Engine
-Exec=/usr/local/bin/openclaw
-Icon={install_dir}/Assets/claw.png
-Terminal=false
-Categories=Game;Action;
-StartupNotify=true
-"""
-        
-        with open("/usr/share/applications/openclaw.desktop", "w") as f:
-            f.write(desktop_entry)
-        
-        # Set permissions for desktop file
-        self.run_command("chmod 644 /usr/share/applications/openclaw.desktop")
-        
-        self.log("OpenClaw installation completed successfully", "SUCCESS")
+        with open("/etc/systemd/system/openclaw.service", "w") as f:
+            f.write(service_content)
+
+        self.run_command("systemctl daemon-reload")
+        self.run_command("systemctl enable openclaw")
+        self.run_command("systemctl start openclaw")
+
+        self.log("OpenClaw service enabled and started", "SUCCESS")
 
     def install_chrome(self):
         """Install Google Chrome"""
@@ -249,7 +255,6 @@ StartupNotify=true
             
             # Copy desktop files to user's desktop
             shortcuts = [
-                "/usr/share/applications/openclaw.desktop",
                 "/usr/share/applications/google-chrome.desktop"
             ]
             
@@ -281,9 +286,10 @@ StartupNotify=true
             chrome_version = "Installation failed"
         
         try:
-            openclaw_status = "Installed" if Path("/opt/openclaw/Build_Release/openclaw").exists() else "Installation failed"
+            openclaw_result = self.run_command("systemctl is-active openclaw", check=False)
+            openclaw_status = "Running" if openclaw_result.stdout.strip() == "active" else "Installed (service not active)"
         except:
-            openclaw_status = "Unknown"
+            openclaw_status = "Installation failed"
         
         report = f"""
 {Colors.GREEN}{Colors.BOLD}VPS SETUP COMPLETED SUCCESSFULLY!{Colors.ENDC}
