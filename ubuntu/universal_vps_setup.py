@@ -847,12 +847,27 @@ lock-enabled=false
         if self.initial_access_method == "SSH":
             # SSH users need to test from another device
             rdp_user = self.rdp_username or "your-rdp-user"
-            test_instructions = (f"Please test these connections from your home computer:\n"
-                               f"• RDP: {self.tailscale_ip}:3389  (user: {rdp_user})\n"
-                               f"• SSH: ssh {getpass.getuser()}@{self.tailscale_ip}")
 
-            print(f"{Colors.CYAN}{test_message}{Colors.ENDC}")
-            print(f"{Colors.CYAN}{test_instructions}{Colors.ENDC}")
+            print(f"""
+{Colors.BOLD}Before you test the connection:{Colors.ENDC}
+{Colors.WARNING}  Tailscale must also be installed on your personal computer
+  or device — the one you will use to RDP in.
+
+  Download and install it now if you haven't already:
+
+      https://tailscale.com/download
+
+  Sign in with the SAME account you used to authorise this server.
+  Once connected, your device and this server will be on the same
+  private network.{Colors.ENDC}
+
+{Colors.BOLD}Your server's Tailscale IP:{Colors.ENDC}
+{Colors.GREEN}  {self.tailscale_ip}{Colors.ENDC}
+
+{Colors.BOLD}Test these connections from your personal device:{Colors.ENDC}
+{Colors.CYAN}  • RDP:  {self.tailscale_ip}:3389   (username: {rdp_user})
+  • SSH:  ssh {getpass.getuser()}@{self.tailscale_ip}{Colors.ENDC}
+""")
 
             while True:
                 test_result = self.get_user_input(
