@@ -133,7 +133,7 @@ create_shortcuts() {
     cat > /usr/local/bin/vps-setup << 'EOF'
 #!/bin/bash
 REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/main"
-curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py" -o /usr/local/bin/universal_vps_setup.py 2>/dev/null \
+curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py" -o /usr/local/bin/universal_vps_setup.py \
     && chmod +x /usr/local/bin/universal_vps_setup.py \
     || echo "  Warning: could not fetch latest script, running cached version"
 python3 /usr/local/bin/universal_vps_setup.py "$@"
@@ -142,7 +142,7 @@ EOF
     cat > /usr/local/bin/vps-post-setup << 'EOF'
 #!/bin/bash
 REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/main"
-curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py" -o /usr/local/bin/post_lockdown_setup.py 2>/dev/null \
+curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py" -o /usr/local/bin/post_lockdown_setup.py \
     && chmod +x /usr/local/bin/post_lockdown_setup.py \
     || echo "  Warning: could not fetch latest script, running cached version"
 python3 /usr/local/bin/post_lockdown_setup.py "$@"

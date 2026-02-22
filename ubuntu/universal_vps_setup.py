@@ -1432,8 +1432,8 @@ WantedBy=multi-user.target
                 if self.test_tailscale_connection():
                     if self.lockdown_server():
                         if self.initial_access_method == "SSH":
-                            print(f"\n{Colors.GREEN}Phase 1 Complete!{Colors.ENDC}")
-                            print(f"{Colors.WARNING}Reconnect via Tailscale and run post_lockdown_setup.py{Colors.ENDC}")
+                            print(f"\n{Colors.GREEN}{Colors.BOLD}  Phase 1 Complete!{Colors.ENDC}")
+                            print(f"{Colors.WARNING}  SSH to {self.tailscale_ip} and run: sudo vps-post-setup{Colors.ENDC}")
                             return
 
                         elif self.initial_access_method == "RDP":
