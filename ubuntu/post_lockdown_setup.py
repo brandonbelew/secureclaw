@@ -259,6 +259,11 @@ WantedBy=multi-user.target
         script = r"""#!/bin/bash
 # SecureClaw Security Verification
 
+# ── Auto-elevate to root ───────────────────────────────────────────────────────
+if [[ $EUID -ne 0 ]]; then
+    exec sudo bash "$0" "$@"
+fi
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
 
@@ -267,8 +272,15 @@ fail()    { echo -e "  ${RED}✗  $1${RESET}"; ISSUES=$((ISSUES+1)); }
 warn()    { echo -e "  ${YELLOW}⚠${RESET}  $1"; }
 info()    { echo -e "  ${CYAN}ℹ${RESET}  $1"; }
 section() { echo -e "\n${BOLD}  ── $1${RESET}\n"; }
+fix_ok()  { echo -e "    ${GREEN}✓  $1${RESET}"; }
+fix_err() { echo -e "    ${RED}✗  $1${RESET}"; }
 
 ISSUES=0
+FIX_UFW=0
+FIX_TS_RULE=0
+FIX_SSH_RULE=0
+FIX_RDP_RULE=0
+RESTART_SVCS=()
 
 clear
 echo
@@ -283,22 +295,22 @@ ufw_out=$(ufw status verbose 2>/dev/null)
 if echo "$ufw_out" | grep -q "Status: active"; then
     pass "UFW is active"
 else
-    fail "UFW is NOT active — server is unprotected!"
+    fail "UFW is NOT active — server is unprotected!"; FIX_UFW=1
 fi
 if echo "$ufw_out" | grep -q "tailscale0"; then
     pass "Tailscale interface rules present"
 else
-    fail "Tailscale interface rules missing"
+    fail "Tailscale interface rules missing"; FIX_TS_RULE=1
 fi
 if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*22|22.*100\.64\.0\.0/10"; then
     pass "SSH (22) restricted to Tailscale subnet"
 else
-    fail "SSH (22) does not have a Tailscale-only rule"
+    fail "SSH (22) does not have a Tailscale-only rule"; FIX_SSH_RULE=1
 fi
 if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*3389|3389.*100\.64\.0\.0/10"; then
     pass "RDP (3389) restricted to Tailscale subnet"
 else
-    fail "RDP (3389) does not have a Tailscale-only rule"
+    fail "RDP (3389) does not have a Tailscale-only rule"; FIX_RDP_RULE=1
 fi
 
 # ── Tailscale ─────────────────────────────────────────────────────────────────
@@ -308,6 +320,7 @@ if [ -n "$ts_ip" ]; then
     pass "Connected — Tailscale IP: $ts_ip"
 else
     fail "Tailscale is not connected!"
+    info "Manual fix: run  sudo tailscale up  then authenticate in your browser"
 fi
 
 # ── SSH ───────────────────────────────────────────────────────────────────────
@@ -350,16 +363,16 @@ if systemctl is-active --quiet openclaw; then
         info "OpenClaw does not expose a network port"
     fi
 else
-    warn "OpenClaw service is not running"
+    warn "OpenClaw service is not running"; RESTART_SVCS+=("openclaw")
 fi
 
 # ── Services ──────────────────────────────────────────────────────────────────
 section "Services"
-for svc in xrdp tailscaled openclaw chrome-cleanup.timer; do
+for svc in xrdp tailscaled chrome-cleanup.timer; do
     if systemctl is-active --quiet "$svc"; then
         pass "$svc is running"
     else
-        warn "$svc is not active"
+        warn "$svc is not active"; RESTART_SVCS+=("$svc")
     fi
 done
 
@@ -390,7 +403,6 @@ else
             fi
         done
 
-        # Check for any unexpected open ports
         other=$(echo "$scan" | grep -E "/[^ ]+ +open" | grep -vE "^22/|^3389/")
         if [ -n "$other" ]; then
             warn "Other open ports detected from internet:"
@@ -410,10 +422,86 @@ echo -e "  ${DIM}─────────────────────
 echo
 if [ "$ISSUES" -eq 0 ]; then
     echo -e "  ${GREEN}${BOLD}  ✓  All checks passed — server is properly secured.${RESET}"
-else
-    echo -e "  ${RED}${BOLD}  ✗  $ISSUES issue(s) found — review the output above.${RESET}"
+    echo
+    read -rp "  Press Enter to close..."
+    exit 0
 fi
+
+echo -e "  ${RED}${BOLD}  ✗  $ISSUES issue(s) found — review the output above.${RESET}"
 echo
+
+# ── Auto-fix ──────────────────────────────────────────────────────────────────
+fixable=$((FIX_UFW + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
+
+if [ "$fixable" -gt 0 ]; then
+    echo -e "  ${CYAN}${BOLD}$fixable issue(s) can be fixed automatically:${RESET}"
+    [ "$FIX_UFW"      -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW"
+    [ "$FIX_TS_RULE"  -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Add Tailscale interface rule"
+    [ "$FIX_SSH_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict SSH to Tailscale subnet"
+    [ "$FIX_RDP_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict RDP to Tailscale subnet"
+    for svc in "${RESTART_SVCS[@]}"; do
+        echo -e "    ${YELLOW}→${RESET}  Start and enable $svc"
+    done
+    echo
+    read -rp "  Apply fixes now? [y/N] > " fix_ans
+    echo
+
+    if [[ "$fix_ans" =~ ^[Yy]$ ]]; then
+        echo -e "  ${BOLD}Applying fixes...${RESET}"
+        echo
+        ufw_changed=0
+
+        if [ "$FIX_UFW" -eq 1 ]; then
+            echo -e "  → Enabling UFW..."
+            ufw --force enable && fix_ok "UFW enabled" || fix_err "Failed to enable UFW"
+            ufw_changed=1
+        fi
+
+        if [ "$FIX_TS_RULE" -eq 1 ]; then
+            echo -e "  → Adding Tailscale interface rules..."
+            ufw allow in on tailscale0 && \
+            ufw allow out on tailscale0 && \
+            fix_ok "Tailscale interface rules added" || fix_err "Failed to add Tailscale rules"
+            ufw_changed=1
+        fi
+
+        if [ "$FIX_SSH_RULE" -eq 1 ]; then
+            echo -e "  → Restricting SSH to Tailscale subnet..."
+            ufw delete allow 22/tcp  2>/dev/null || true
+            ufw delete allow 22      2>/dev/null || true
+            ufw delete allow OpenSSH 2>/dev/null || true
+            ufw allow from 100.64.0.0/10 to any port 22 proto tcp && \
+                fix_ok "SSH restricted to Tailscale" || fix_err "Failed to restrict SSH"
+            ufw_changed=1
+        fi
+
+        if [ "$FIX_RDP_RULE" -eq 1 ]; then
+            echo -e "  → Restricting RDP to Tailscale subnet..."
+            ufw delete allow 3389/tcp 2>/dev/null || true
+            ufw delete allow 3389     2>/dev/null || true
+            ufw allow from 100.64.0.0/10 to any port 3389 proto tcp && \
+                fix_ok "RDP restricted to Tailscale" || fix_err "Failed to restrict RDP"
+            ufw_changed=1
+        fi
+
+        if [ "$ufw_changed" -eq 1 ]; then
+            echo -e "  → Reloading UFW..."
+            ufw --force reload && fix_ok "UFW reloaded" || fix_err "UFW reload failed"
+        fi
+
+        for svc in "${RESTART_SVCS[@]}"; do
+            echo -e "  → Starting $svc..."
+            systemctl enable --now "$svc" 2>/dev/null && \
+                fix_ok "$svc started" || fix_err "Could not start $svc"
+        done
+
+        echo
+        echo -e "  ${GREEN}${BOLD}Fixes applied — re-running verification...${RESET}"
+        sleep 2
+        exec "$0"
+    fi
+fi
+
 read -rp "  Press Enter to close..."
 """
 
