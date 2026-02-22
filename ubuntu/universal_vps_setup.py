@@ -1123,11 +1123,14 @@ TAILSCALE TROUBLESHOOTING:
         self._save_state(server_locked_down=True)
 
         if self.initial_access_method == "SSH":
-            print(f"\n{Colors.FAIL}SSH CONNECTION WILL BE LOST IN 10 SECONDS!{Colors.ENDC}")
-            print(f"{Colors.WARNING}Reconnect using Tailscale IP: {self.tailscale_ip}{Colors.ENDC}")
+            print(f"\n{Colors.FAIL}  ✗  SSH CONNECTION WILL BE LOST IN 10 SECONDS!{Colors.ENDC}")
+            print(f"\n{Colors.BOLD}  What to do next:{Colors.ENDC}")
+            print(f"{Colors.WARNING}  1. Reconnect via SSH using your Tailscale IP: {self.tailscale_ip}{Colors.ENDC}")
+            print(f"{Colors.WARNING}  2. Run: sudo vps-post-setup{Colors.ENDC}")
+            print(f"{Colors.WARNING}     (this finishes installing OpenClaw and Chrome){Colors.ENDC}\n")
 
             for i in range(10, 0, -1):
-                print(f"{Colors.WARNING}Connection closing in {i} seconds...{Colors.ENDC}")
+                print(f"{Colors.WARNING}  Disconnecting in {i}...{Colors.ENDC}")
                 time.sleep(1)
 
         elif self.initial_access_method == "RDP":
