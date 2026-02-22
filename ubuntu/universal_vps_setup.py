@@ -253,35 +253,46 @@ class UniversalVPSSetup:
         thread.daemon = True
         thread.start()
 
-    def install_rdp(self):
-        """Install and configure RDP with session persistence"""
-        print(f"\n{Colors.HEADER}=== RDP INSTALLATION ==={Colors.ENDC}")
-        
-        if self.initial_access_method == "RDP":
-            self.log("Already connected via RDP, enhancing configuration...", "SUCCESS")
-            response = self.get_user_input(
-                "You're already using RDP. Would you like to enhance the configuration for better session persistence?",
-                ["Yes, enhance RDP", "Skip RDP configuration"], 
-                default_index=0
-            )
-            if response == 1:  # Skip
-                self.log("RDP configuration skipped by user", "WARNING")
-                return
+    def configure_rdp_persistence(self):
+        """Ensure xrdp is installed and configured for session persistence.
+        Checks existing config before making any changes - only touches what needs fixing."""
+        print(f"\n{Colors.HEADER}=== RDP SESSION PERSISTENCE ==={Colors.ENDC}")
+
+        changes_made = []
+        needs_xrdp_restart = False
+
+        # 1. Check if xrdp is installed
+        result = self.run_command("dpkg -l xrdp 2>/dev/null | grep '^ii'", check=False)
+        if result.returncode != 0:
+            self.log("xrdp not found, installing...")
+            if self.gui_available:
+                self.show_gui_progress("Installing xrdp", "Setting up remote desktop server...")
+            if not self.is_desktop_env:
+                self.run_command("apt install -y xrdp ubuntu-desktop-minimal", capture_output=False)
+            else:
+                self.run_command("apt install -y xrdp", capture_output=False)
+            needs_xrdp_restart = True
+            changes_made.append("xrdp installed")
         else:
-            self.log("Installing RDP server for SSH users...", "SUCCESS")
-        
-        if self.gui_available:
-            self.show_gui_progress("Installing RDP Server", "Setting up remote desktop access...")
-        
-        # Install XRDP and desktop environment if not already present
-        self.run_command("apt install -y xrdp", capture_output=False)
-        
-        # Only install desktop if we don't detect one
-        if not self.is_desktop_env:
-            self.run_command("apt install -y ubuntu-desktop-minimal", capture_output=False)
-        
-        # Configure XRDP for session persistence
-        xrdp_config = """
+            self.log("xrdp is already installed", "SUCCESS")
+
+        # 2. Check xrdp.ini for the Xorg module (required for session persistence)
+        # The Xorg module (libxup.so) attaches to an existing X session on reconnect.
+        # Xvnc creates a new session each time - apps would not persist.
+        xrdp_ini_path = "/etc/xrdp/xrdp.ini"
+        try:
+            with open(xrdp_ini_path, "r") as f:
+                xrdp_config = f.read()
+
+            has_xorg_section = "[Xorg]" in xrdp_config
+            has_libxup = "libxup.so" in xrdp_config
+
+            if has_xorg_section and has_libxup:
+                self.log("xrdp Xorg persistence module is already configured", "SUCCESS")
+            else:
+                self.log("Xorg persistence module missing from xrdp config, adding it...")
+                self.run_command(f"cp {xrdp_ini_path} {xrdp_ini_path}.backup")
+                xorg_block = """
 [Xorg]
 name=Xorg
 lib=libxup.so
@@ -291,42 +302,90 @@ ip=127.0.0.1
 port=-1
 code=20
 """
-        
-        # Backup original config
-        self.run_command("cp /etc/xrdp/xrdp.ini /etc/xrdp/xrdp.ini.backup")
-        
-        with open("/etc/xrdp/xrdp.ini", "a") as f:
-            f.write(xrdp_config)
-        
-        # Create .xsessionrc for persistent sessions
-        xsession_config = """#!/bin/bash
-export GNOME_SHELL_SESSION_MODE=ubuntu
-export XDG_CURRENT_DESKTOP=ubuntu:GNOME
-export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu:/etc/xdg
-gnome-session --session=ubuntu
+                with open(xrdp_ini_path, "a") as f:
+                    f.write(xorg_block)
+                needs_xrdp_restart = True
+                changes_made.append("xrdp Xorg persistence module added")
+
+        except FileNotFoundError:
+            self.log("xrdp.ini not found - xrdp may not have installed correctly", "ERROR")
+
+        # 3. Disable sleep and screen lock system-wide via dconf
+        # Without this, gdm3 will lock/sleep the session while disconnected,
+        # killing any running apps (Chrome, OpenClaw, etc.)
+        self.log("Checking session idle/sleep/lock settings...")
+        dconf_dir = Path("/etc/dconf/db/local.d")
+        dconf_dir.mkdir(parents=True, exist_ok=True)
+
+        dconf_config = """\
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-timeout=0
+sleep-inactive-battery-timeout=0
+power-button-action='nothing'
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
 """
-        
-        # Apply to all users
-        with open("/etc/skel/.xsessionrc", "w") as f:
-            f.write(xsession_config)
-        
-        # Configure existing users
-        for user_dir in Path("/home").iterdir():
-            if user_dir.is_dir():
-                xsessionrc_path = user_dir / ".xsessionrc"
-                with open(xsessionrc_path, "w") as f:
-                    f.write(xsession_config)
-                self.run_command(f"chown {user_dir.name}:{user_dir.name} {xsessionrc_path}")
-                self.run_command(f"chmod +x {xsessionrc_path}")
-        
-        # Enable and start XRDP
-        self.run_command("systemctl enable xrdp")
-        self.run_command("systemctl restart xrdp")
-        
-        # Configure firewall for RDP (temporarily)
-        self.run_command("ufw allow 3389/tcp")
-        
-        self.log("RDP installation/enhancement completed", "SUCCESS")
+        dconf_file = dconf_dir / "00-rdp-persistence"
+        existing = dconf_file.read_text() if dconf_file.exists() else ""
+
+        if existing.strip() == dconf_config.strip():
+            self.log("Session persistence (no sleep/lock) already configured", "SUCCESS")
+        else:
+            with open(dconf_file, "w") as f:
+                f.write(dconf_config)
+
+            # Lock these settings so users can't accidentally re-enable sleep/lock
+            locks_dir = dconf_dir / "locks"
+            locks_dir.mkdir(parents=True, exist_ok=True)
+            with open(locks_dir / "00-rdp-persistence", "w") as f:
+                f.write("/org/gnome/desktop/session/idle-delay\n")
+                f.write("/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-timeout\n")
+                f.write("/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-timeout\n")
+                f.write("/org/gnome/desktop/screensaver/lock-enabled\n")
+
+            self.run_command("dconf update")
+            changes_made.append("sleep and screen lock disabled")
+
+        # 4. Temporarily open RDP port (will be locked to Tailscale subnet at lockdown step)
+        self.run_command("ufw allow 3389/tcp", check=False)
+
+        # 5. Report results and handle xrdp restart
+        if not changes_made:
+            self.log("RDP session persistence is already properly configured - no changes needed", "SUCCESS")
+            return
+
+        self.log(f"Changes applied: {', '.join(changes_made)}", "SUCCESS")
+
+        if needs_xrdp_restart:
+            self.run_command("systemctl enable xrdp")
+
+            if self.initial_access_method == "RDP":
+                warning = (
+                    "xrdp configuration was updated and needs to restart.\n\n"
+                    "Your RDP session will briefly disconnect.\n"
+                    "Reconnect in a few seconds to continue setup."
+                )
+                if self.gui_available:
+                    try:
+                        root = tk.Tk()
+                        root.withdraw()
+                        messagebox.showwarning("Brief Disconnection Required", warning)
+                        root.destroy()
+                    except Exception:
+                        pass
+
+                print(f"\n{Colors.WARNING}{'=' * 60}{Colors.ENDC}")
+                print(f"{Colors.WARNING}xrdp restart required — you will briefly disconnect!{Colors.ENDC}")
+                print(f"{Colors.WARNING}Reconnect within 30 seconds to continue.{Colors.ENDC}")
+                print(f"{Colors.WARNING}{'=' * 60}{Colors.ENDC}")
+                time.sleep(5)
+
+            self.run_command("systemctl restart xrdp")
+            self.log("xrdp restarted with persistence configuration", "SUCCESS")
 
     def get_user_input(self, message, options, default_index=0):
         """Get user input via GUI or console based on environment"""
@@ -936,7 +995,7 @@ StartupNotify=true
             
             self.check_root()
             self.update_system()
-            self.install_rdp()
+            self.configure_rdp_persistence()
             self.install_tailscale()
             
             if self.configure_tailscale():
