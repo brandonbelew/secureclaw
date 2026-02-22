@@ -182,6 +182,14 @@ class PostLockdownSetup:
         self.log(f"OpenClaw binary found at: {openclaw_bin}", "SUCCESS")
         npm_bin_dir = str(Path(openclaw_bin).parent)
 
+        # Add npm bin dir to the user's PATH so 'openclaw' works in a terminal
+        bashrc = Path(f"/home/{install_user}/.bashrc")
+        path_line = f'\nexport PATH="{npm_bin_dir}:$PATH"\n'
+        if bashrc.exists() and npm_bin_dir not in bashrc.read_text():
+            with open(bashrc, "a") as f:
+                f.write(path_line)
+            self.log(f"Added {npm_bin_dir} to {install_user}'s PATH", "SUCCESS")
+
         # Create systemd service to run OpenClaw as the target user
         service_content = f"""\
 [Unit]
@@ -333,8 +341,10 @@ WantedBy=multi-user.target
 
 {Colors.CYAN}Next Steps:{Colors.ENDC}
 1. Connect via RDP: {tailscale_ip}:3389
-2. Launch applications from desktop or menu
-3. Enjoy OpenClaw and browse with Chrome!
+2. Open a terminal and run: {Colors.BOLD}openclaw{Colors.ENDC}
+   {Colors.DIM}This completes the OpenClaw onboarding (API keys, preferences, etc.){Colors.ENDC}
+3. OpenClaw will then continue running as a background service automatically
+4. Google Chrome is available on your desktop
 
 {Colors.GREEN}Setup logs saved to: /var/log/vps_post_setup.log{Colors.ENDC}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
