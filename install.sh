@@ -188,6 +188,18 @@ main() {
     check_root
     check_ubuntu
 
+    print_divider
+    echo
+    echo -e "  Type ${YELLOW}${BOLD}INSTALL${RESET} to accept and continue, or anything else to cancel."
+    echo
+    read -rp "  > " confirm
+    echo
+    if [[ "$confirm" != "INSTALL" ]]; then
+        echo -e "  ${YELLOW}Cancelled.${RESET} No changes were made to your server."
+        echo
+        exit 0
+    fi
+
     echo -e "  ${BOLD}Preparing your server...${RESET}"
     echo
     print_step 1 4 "Checking system...                       "
