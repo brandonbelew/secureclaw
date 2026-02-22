@@ -143,10 +143,10 @@ class PostLockdownSetup:
             self.log("Skipping OpenClaw install — no target user found", "WARNING")
             return
 
-        # Install Node.js v22+ via NodeSource as root
-        self.log("Installing Node.js v22 prerequisite...")
+        # Install Node.js v22+ and build tools (needed to compile native modules)
+        self.log("Installing Node.js v22 and build tools...")
         self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
-        self.run_command("apt-get install -y nodejs")
+        self.run_command("apt-get install -y nodejs build-essential")
 
         # The openclaw.ai installer script requires an interactive TTY (it uses
         # gum for UI and npm has TTY requirements) which we don't have in a su
@@ -160,19 +160,12 @@ class PostLockdownSetup:
         # Point npm at our pre-created directory
         self.run_command(f"su - {install_user} -c 'npm config set prefix {npm_global}'")
 
-        # Install openclaw — try latest, fall back to next
+        # Install openclaw via npm
         self.log("Installing OpenClaw via npm...")
-        result = self.run_command(
+        self.run_command(
             f"su - {install_user} -c 'npm install -g openclaw@latest'",
-            capture_output=False,
-            check=False
+            capture_output=False
         )
-        if result.returncode != 0:
-            self.log("openclaw@latest failed, trying @next...", "WARNING")
-            self.run_command(
-                f"su - {install_user} -c 'npm install -g openclaw@next'",
-                capture_output=False
-            )
 
         openclaw_bin = f"{npm_global}/bin/openclaw"
         if not Path(openclaw_bin).exists():
