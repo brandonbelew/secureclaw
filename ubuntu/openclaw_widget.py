@@ -451,9 +451,11 @@ class OpenClawWidget(Gtk.Window):
 
         row.pack_start(text_box, True, True, 0)
 
-        btn = Gtk.Button(label="Go")
+        btn = Gtk.Button()
+        btn_lbl = Gtk.Label()
+        btn_lbl.set_markup('<span foreground="#e0e0e0">Go</span>')
+        btn.add(btn_lbl)
         btn.get_style_context().add_class("action-button")
-        btn.get_child().set_markup('<span foreground="#e0e0e0">Go</span>')
         btn.connect("clicked", callback)
         row.pack_start(btn, False, False, 0)
 
@@ -535,9 +537,11 @@ class OpenClawWidget(Gtk.Window):
             tag.get_style_context().add_class("tool-installed")
             row.pack_start(tag, False, False, 0)
         else:
-            btn = Gtk.Button(label="Install")
+            btn = Gtk.Button()
+            btn_lbl = Gtk.Label()
+            btn_lbl.set_markup('<span foreground="#4caf50">Install</span>')
+            btn.add(btn_lbl)
             btn.get_style_context().add_class("tool-install-btn")
-            btn.get_child().set_markup('<span foreground="#4caf50">Install</span>')
             btn.connect("clicked", lambda b, t=tool: self._on_install_tool(t))
             row.pack_start(btn, False, False, 0)
 
@@ -565,9 +569,11 @@ class OpenClawWidget(Gtk.Window):
         self.uptime_label.get_style_context().add_class("uptime-badge")
         box.pack_start(self.uptime_label, True, False, 0)
 
-        refresh_btn = Gtk.Button(label="Refresh")
+        refresh_btn = Gtk.Button()
+        refresh_lbl = Gtk.Label()
+        refresh_lbl.set_markup('<span foreground="#aaaaaa">Refresh</span>')
+        refresh_btn.add(refresh_lbl)
         refresh_btn.get_style_context().add_class("refresh-button")
-        refresh_btn.get_child().set_markup('<span foreground="#888888">Refresh</span>')
         refresh_btn.connect("clicked", lambda b: self._schedule_refresh())
         box.pack_end(refresh_btn, False, False, 0)
 
