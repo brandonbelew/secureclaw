@@ -1803,6 +1803,22 @@ WantedBy=timers.target
 • UFW firewall active with restrictive rules
 • All connections must use Tailscale VPN
 
+{Colors.FAIL}{Colors.BOLD}╔══════════════════════════════════════════════════════════════╗
+║       !! ACTION REQUIRED: TAILSCALE KEY EXPIRY !!            ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  Tailscale keys expire after 180 days by default.           ║
+║  When your key expires you will be LOCKED OUT of your        ║
+║  VPS with no way to reconnect remotely.                      ║
+║                                                              ║
+║  Disable key expiry NOW — takes 30 seconds:                  ║
+║                                                              ║
+║  1. Go to: https://login.tailscale.com/admin/machines        ║
+║  2. Find this server and click the  ···  menu                ║
+║  3. Click "Disable key expiry"                               ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝{Colors.ENDC}
+
 {Colors.GREEN}Setup completed successfully!{Colors.ENDC}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """

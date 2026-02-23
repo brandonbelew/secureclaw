@@ -84,6 +84,61 @@ class PostLockdownSetup:
             self.log(f"Failed to verify Tailscale connection: {e}", "ERROR")
             return False
 
+    def configure_hostname(self):
+        """Interactively set a memorable system hostname and sync it to Tailscale."""
+        import re
+        print(f"\n{Colors.HEADER}=== SET SERVER HOSTNAME ==={Colors.ENDC}")
+
+        try:
+            current = subprocess.run(
+                ["hostname"], capture_output=True, text=True
+            ).stdout.strip()
+        except Exception:
+            current = "unknown"
+
+        print(f"""
+{Colors.CYAN}Give your server a memorable name. It will appear in:{Colors.ENDC}
+  • Your Tailscale admin console  (tailscale.com/admin/machines)
+  • Your terminal prompt
+  • The OpenClaw Control Panel widget
+
+{Colors.DIM}Examples:  trade-bot-1   openclaw-prod   my-vps   btc-server{Colors.ENDC}
+
+Current hostname: {Colors.BOLD}{current}{Colors.ENDC}
+""")
+
+        name = input(
+            f"{Colors.CYAN}Enter new hostname (or press Enter to keep '{current}'): {Colors.ENDC}"
+        ).strip()
+
+        if not name:
+            self.log(f"Keeping existing hostname: {current}", "INFO")
+            return
+
+        # Sanitize to RFC 1123: lowercase, alphanumeric + hyphens, no leading/trailing hyphens
+        name = re.sub(r'[^a-z0-9-]', '-', name.lower()).strip('-')
+        if not name:
+            self.log("Invalid hostname entered, keeping existing", "WARNING")
+            return
+
+        # Set system hostname
+        self.run_command(f"hostnamectl set-hostname {name}")
+        self.log(f"System hostname set to: {name}", "SUCCESS")
+
+        # Push to Tailscale (tailscale set available since Tailscale 1.42)
+        result = subprocess.run(
+            ["tailscale", "set", f"--hostname={name}"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            self.log(f"Tailscale hostname updated to: {name}", "SUCCESS")
+        else:
+            self.log(
+                f"Could not update Tailscale hostname automatically. "
+                f"Set it manually: tailscale.com/admin/machines → ... → Edit name",
+                "WARNING"
+            )
+
     def test_lockdown_status(self):
         """Verify server lockdown is working"""
         print(f"\n{Colors.HEADER}=== LOCKDOWN STATUS CHECK ==={Colors.ENDC}")
@@ -835,12 +890,29 @@ not a substitute for good security practices:
      {Colors.DIM}to verify firewall rules remain intact{Colors.ENDC}
   {Colors.BOLD}•{Colors.ENDC}  Keep your server patched:  sudo apt upgrade
 
+{Colors.FAIL}{Colors.BOLD}╔══════════════════════════════════════════════════════════════╗
+║       !! ACTION REQUIRED: TAILSCALE KEY EXPIRY !!            ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  Tailscale keys expire after 180 days by default.           ║
+║  When your key expires you will be LOCKED OUT of your        ║
+║  VPS with no way to reconnect remotely.                      ║
+║                                                              ║
+║  Disable key expiry NOW — takes 30 seconds:                  ║
+║                                                              ║
+║  1. Go to: https://login.tailscale.com/admin/machines        ║
+║  2. Find this server and click the  ···  menu                ║
+║  3. Click "Disable key expiry"                               ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝{Colors.ENDC}
+
 {Colors.CYAN}Next Steps:{Colors.ENDC}
-1. Connect via RDP: {tailscale_ip}:3389
-2. Open a terminal and run: {Colors.BOLD}openclaw onboard{Colors.ENDC}
+1. {Colors.BOLD}Disable Tailscale key expiry{Colors.ENDC} (see above — do this first!)
+2. Connect via RDP: {tailscale_ip}:3389
+3. Open a terminal and run: {Colors.BOLD}openclaw onboard{Colors.ENDC}
    {Colors.DIM}This completes the OpenClaw onboarding (API keys, preferences, etc.){Colors.ENDC}
-3. OpenClaw will then continue running as a background service automatically
-4. Google Chrome is available on your desktop
+4. OpenClaw will then continue running as a background service automatically
+5. Google Chrome is available on your desktop
 
 {Colors.GREEN}Setup logs saved to: /var/log/vps_post_setup.log{Colors.ENDC}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -870,6 +942,7 @@ not a substitute for good security practices:
                 print(f"{Colors.FAIL}Tailscale connection could not be verified!{Colors.ENDC}")
                 print(f"{Colors.WARNING}Continuing anyway, but please verify your connection.{Colors.ENDC}")
             
+            self.configure_hostname()
             self.test_lockdown_status()
             self.install_openclaw()
             self.install_chrome()
