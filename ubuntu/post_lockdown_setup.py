@@ -595,6 +595,95 @@ WantedBy=timers.target
         self.run_command("systemctl start chrome-cleanup.timer")
         self.log("Chrome cleanup timer enabled (runs daily)", "SUCCESS")
 
+    def _get_repo_branch(self):
+        """Detect the current git branch, defaulting to main."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True,
+                cwd=os.path.dirname(os.path.abspath(__file__))
+            )
+            branch = result.stdout.strip()
+            return branch if branch in ("main", "dev") else "main"
+        except Exception:
+            return "main"
+
+    def install_openclaw_widget(self):
+        """Install the OpenClaw Control Panel desktop widget."""
+        print(f"\n{Colors.HEADER}=== OPENCLAW CONTROL PANEL ==={Colors.ENDC}")
+        self.log("Installing OpenClaw Control Panel...")
+
+        branch = self._get_repo_branch()
+        self.log(f"Using branch: {branch}")
+
+        raw_base = f"https://raw.githubusercontent.com/brandonbelew/secureclaw/{branch}"
+        widget_url = f"{raw_base}/ubuntu/openclaw_widget.py"
+        install_bin = "/usr/local/bin/openclaw-widget"
+
+        # Download widget script
+        self.run_command(f"wget -q -O {install_bin} {widget_url}")
+        os.chmod(install_bin, 0o755)
+        self.log("Widget script downloaded and made executable", "SUCCESS")
+
+        # Install GTK3 Python bindings (pre-installed on XFCE Ubuntu, but ensure present)
+        self.run_command("apt-get install -y python3-gi gir1.2-gtk-3.0")
+        self.log("GTK3 Python bindings installed", "SUCCESS")
+
+        # Sudoers entry for passwordless UFW status check
+        sudoers_content = (
+            "# Allow sudo group to check UFW status without password (used by openclaw-widget)\n"
+            "%sudo ALL=(ALL) NOPASSWD: /usr/sbin/ufw status\n"
+        )
+        sudoers_path = "/etc/sudoers.d/openclaw-widget"
+        with open(sudoers_path, "w") as f:
+            f.write(sudoers_content)
+        os.chmod(sudoers_path, 0o440)
+        self.log("Sudoers entry written for UFW status check", "SUCCESS")
+
+        # System-wide application menu entry
+        desktop_dir = Path("/usr/local/share/applications")
+        desktop_dir.mkdir(parents=True, exist_ok=True)
+        desktop_content = (
+            "[Desktop Entry]\n"
+            "Name=OpenClaw Control Panel\n"
+            "Comment=OpenClaw service status and launcher\n"
+            "Exec=/usr/local/bin/openclaw-widget\n"
+            "Icon=network-server\n"
+            "Terminal=false\n"
+            "Type=Application\n"
+            "Categories=Network;System;\n"
+            "StartupNotify=true\n"
+            "X-GNOME-Autostart-enabled=true\n"
+        )
+        system_desktop_path = desktop_dir / "openclaw-widget.desktop"
+        with open(system_desktop_path, "w") as f:
+            f.write(desktop_content)
+        self.log("Application menu entry written", "SUCCESS")
+
+        # Per-user autostart entries
+        for user_dir in Path("/home").iterdir():
+            if not user_dir.is_dir():
+                continue
+            try:
+                uid = user_dir.stat().st_uid
+            except Exception:
+                continue
+            if uid < 1000:
+                continue
+
+            username = user_dir.name
+            autostart_dir = user_dir / ".config" / "autostart"
+            autostart_dir.mkdir(parents=True, exist_ok=True)
+
+            autostart_path = autostart_dir / "openclaw-widget.desktop"
+            with open(autostart_path, "w") as f:
+                f.write(desktop_content)
+
+            self.run_command(f"chown -R {username}:{username} {autostart_dir}")
+            self.log(f"Autostart entry created for {username}", "SUCCESS")
+
+        self.log("OpenClaw Control Panel installed", "SUCCESS")
+
     def create_user_shortcuts(self):
         """Create desktop shortcuts for regular users"""
         print(f"\n{Colors.HEADER}=== CREATING USER SHORTCUTS ==={Colors.ENDC}")
@@ -773,6 +862,7 @@ not a substitute for good security practices:
             self.install_chrome()
             self.install_chrome_cleanup()
             self.install_security_check()
+            self.install_openclaw_widget()
             self.create_user_shortcuts()
             self.create_final_report()
             
