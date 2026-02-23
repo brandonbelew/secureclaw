@@ -5,6 +5,7 @@ GTK3 desktop widget for OpenClaw service status and quick actions.
 """
 
 import base64
+from datetime import datetime, timezone
 import json
 import os
 import subprocess
@@ -438,6 +439,18 @@ class OpenClawWidget(Gtk.Window):
         self.card_tailscale = StatusCard("Tailscale VPN")
         self.card_firewall = StatusCard("Firewall Rules")
 
+        # Extra detail labels inside the Tailscale card
+        self.ts_ip_host_label = Gtk.Label(label="")
+        self.ts_ip_host_label.get_style_context().add_class("led-status")
+        self.ts_ip_host_label.set_halign(Gtk.Align.START)
+        self.ts_ip_host_label.set_ellipsize(3)
+        self.card_tailscale.box.pack_start(self.ts_ip_host_label, False, False, 0)
+
+        self.ts_expiry_label = Gtk.Label(label="")
+        self.ts_expiry_label.get_style_context().add_class("led-status")
+        self.ts_expiry_label.set_halign(Gtk.Align.START)
+        self.card_tailscale.box.pack_start(self.ts_expiry_label, False, False, 0)
+
         for card in (self.card_service, self.card_tailscale, self.card_firewall):
             card.box.set_hexpand(True)
             grid.pack_start(card.box, True, True, 0)
@@ -647,23 +660,26 @@ class OpenClawWidget(Gtk.Window):
     def _do_refresh(self):
         """Run all checks in background thread, post results to UI."""
         service_state, service_text = self._check_service()
-        tailscale_state, tailscale_text = self._check_tailscale()
+        tailscale_state, tailscale_text, ts_ip_host, ts_expiry = self._check_tailscale()
         firewall_state, firewall_text = self._check_firewall()
         version = self._get_version()
         uptime = self._get_uptime()
         tools = self._fetch_tools_manifest()
 
         GLib.idle_add(self._apply_refresh, service_state, service_text,
-                      tailscale_state, tailscale_text, firewall_state,
-                      firewall_text, version, uptime, tools)
+                      tailscale_state, tailscale_text, ts_ip_host, ts_expiry,
+                      firewall_state, firewall_text, version, uptime, tools)
 
     def _apply_refresh(self, service_state, service_text,
-                       tailscale_state, tailscale_text,
+                       tailscale_state, tailscale_text, ts_ip_host, ts_expiry,
                        firewall_state, firewall_text,
                        version, uptime, tools):
         self.card_service.set_state(service_state, service_text)
         self.card_tailscale.set_state(tailscale_state, tailscale_text)
         self.card_firewall.set_state(firewall_state, firewall_text)
+
+        self.ts_ip_host_label.set_text(ts_ip_host)
+        self.ts_expiry_label.set_markup(ts_expiry) if ts_expiry else self.ts_expiry_label.set_text("")
 
         hostname = os.uname().nodename
         self.version_label.set_text(f"{version} · {hostname}")
@@ -694,19 +710,52 @@ class OpenClawWidget(Gtk.Window):
             return "red", "not running"
 
     def _check_tailscale(self):
+        """Returns (led_state, status_text, ip_host_text, expiry_markup)."""
         stdout, stderr, rc = run_command("tailscale status --json", timeout=8)
         if rc != 0:
             if "not found" in stderr.lower() or "command" in stderr.lower():
-                return "yellow", "not installed"
-            return "red", "not running"
+                return "yellow", "not installed", "", ""
+            return "red", "not running", "", ""
         try:
             data = json.loads(stdout)
             state = data.get("BackendState", "")
+            self_node = data.get("Self", {})
+
+            # IP + hostname
+            ips = self_node.get("TailscaleIPs", [])
+            ip = ips[0] if ips else ""
+            hostname = self_node.get("HostName", "") or self_node.get("DNSName", "").split(".")[0]
+            ip_host = f"{ip}  ·  {hostname}" if ip else ""
+
+            # Key expiry
+            expiry_str = self_node.get("KeyExpiry", "")
+            expiry_markup = self._format_expiry(expiry_str)
+
             if state == "Running":
-                return "green", "Running"
-            return "red", state or "not running"
+                return "green", "Running", ip_host, expiry_markup
+            return "red", state or "not running", ip_host, expiry_markup
         except Exception:
-            return "yellow", "unknown"
+            return "yellow", "unknown", "", ""
+
+    @staticmethod
+    def _format_expiry(expiry_str):
+        if not expiry_str:
+            return '<span foreground="#555555">No expiry set</span>'
+        try:
+            expiry_dt = datetime.fromisoformat(expiry_str.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            days = (expiry_dt - now).days
+            date_str = expiry_dt.strftime("%b %d %Y")
+            if days < 0:
+                return f'<span foreground="#f44336">Key EXPIRED</span>'
+            elif days < 7:
+                return f'<span foreground="#f44336">Expires in {days}d  ⚠</span>'
+            elif days < 30:
+                return f'<span foreground="#ffb300">Expires in {days}d</span>'
+            else:
+                return f'<span foreground="#555555">Expires {date_str}</span>'
+        except Exception:
+            return ""
 
     def _check_firewall(self):
         stdout, stderr, rc = run_command("sudo -n ufw status", timeout=8)
