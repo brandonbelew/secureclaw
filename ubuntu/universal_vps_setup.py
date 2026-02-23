@@ -584,17 +584,29 @@ class UniversalVPSSetup:
         )
 
         if pwd_choice == 1:
-            while True:
+            max_attempts = 3
+            attempt = 0
+            password = None
+            while attempt < max_attempts:
+                attempt += 1
                 pwd1 = getpass.getpass(f"\n{Colors.CYAN}Enter your password: {Colors.ENDC}")
                 if not pwd1:
                     print(f"{Colors.WARNING}Password cannot be empty.{Colors.ENDC}")
+                    attempt -= 1  # don't count empty entry as an attempt
                     continue
                 pwd2 = getpass.getpass(f"{Colors.CYAN}Confirm your password: {Colors.ENDC}")
                 if pwd1 != pwd2:
-                    print(f"{Colors.WARNING}Passwords do not match. Try again.{Colors.ENDC}")
+                    remaining = max_attempts - attempt
+                    if remaining > 0:
+                        print(f"{Colors.WARNING}Passwords do not match. {remaining} attempt(s) remaining.{Colors.ENDC}")
                     continue
                 password = pwd1
                 break
+
+            if password is None:
+                print(f"{Colors.WARNING}Passwords did not match after {max_attempts} attempts — using the generated password instead.{Colors.ENDC}")
+                password = generated_password
+
             show_cred_box(username, password, "  Save this password before continuing!")
         else:
             password = generated_password
