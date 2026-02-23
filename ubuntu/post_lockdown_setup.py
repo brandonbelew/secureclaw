@@ -11,6 +11,10 @@ import subprocess
 import time
 from pathlib import Path
 
+# Injected at install time by vps-post-setup shortcut via sed.
+# When None, _get_repo_branch() falls back to git detection.
+REPO_BRANCH_OVERRIDE = None  # injected at install time
+
 class Colors:
     HEADER = '\033[95m'
     BLUE = '\033[94m'
@@ -651,7 +655,9 @@ WantedBy=timers.target
         self.log("Chrome cleanup timer enabled (runs daily)", "SUCCESS")
 
     def _get_repo_branch(self):
-        """Detect the current git branch, defaulting to main."""
+        """Return the active branch. Override injected at install time takes priority."""
+        if REPO_BRANCH_OVERRIDE in ("main", "dev"):
+            return REPO_BRANCH_OVERRIDE
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
