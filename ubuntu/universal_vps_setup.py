@@ -1162,14 +1162,17 @@ TAILSCALE TROUBLESHOOTING:
         self._save_state(server_locked_down=True)
 
         if self.initial_access_method == "SSH":
-            print(f"\n{Colors.FAIL}  ✗  SSH CONNECTION WILL BE LOST IN 10 SECONDS!{Colors.ENDC}")
+            print(f"\n{Colors.WARNING}  ⚠  Your connection may disconnect — this is normal.{Colors.ENDC}")
             print(f"\n{Colors.BOLD}  What to do next:{Colors.ENDC}")
-            print(f"{Colors.WARNING}  1. Reconnect via SSH using your Tailscale IP: {self.tailscale_ip}{Colors.ENDC}")
-            print(f"{Colors.WARNING}  2. Run: sudo vps-post-setup{Colors.ENDC}")
-            print(f"{Colors.WARNING}     (this finishes installing OpenClaw and Chrome){Colors.ENDC}\n")
+            print(f"{Colors.WARNING}  • If you stay connected: run sudo vps-post-setup right here in this window.{Colors.ENDC}")
+            print(f"{Colors.WARNING}  • If you get disconnected: reconnect via SSH to {self.tailscale_ip}{Colors.ENDC}")
+            print(f"{Colors.WARNING}    then run: sudo vps-post-setup{Colors.ENDC}")
+            print(f"{Colors.WARNING}    (this finishes installing OpenClaw and Chrome){Colors.ENDC}")
+            print(f"\n{Colors.FAIL}  ✗  IMPORTANT: Do NOT run sudo vps-post-setup inside an RDP session.{Colors.ENDC}")
+            print(f"{Colors.FAIL}     Use this console or a direct SSH terminal only.{Colors.ENDC}\n")
 
             for i in range(10, 0, -1):
-                print(f"{Colors.WARNING}  Disconnecting in {i}...{Colors.ENDC}")
+                print(f"{Colors.WARNING}  Closing connection in {i}...{Colors.ENDC}")
                 time.sleep(1)
 
         elif self.initial_access_method == "RDP":
@@ -1867,7 +1870,10 @@ WantedBy=timers.target
                     if self.lockdown_server():
                         if self.initial_access_method == "SSH":
                             print(f"\n{Colors.GREEN}{Colors.BOLD}  Phase 1 Complete!{Colors.ENDC}")
-                            print(f"{Colors.WARNING}  SSH to {self.tailscale_ip} and run: sudo vps-post-setup{Colors.ENDC}")
+                            print(f"{Colors.WARNING}  • If you stayed connected: run sudo vps-post-setup right here in this window.{Colors.ENDC}")
+                            print(f"{Colors.WARNING}  • If you got disconnected: reconnect via SSH to {self.tailscale_ip}{Colors.ENDC}")
+                            print(f"{Colors.WARNING}    then run: sudo vps-post-setup{Colors.ENDC}")
+                            print(f"{Colors.FAIL}  IMPORTANT: Do NOT run sudo vps-post-setup inside an RDP session.{Colors.ENDC}")
                             return
 
                         elif self.initial_access_method == "RDP":
