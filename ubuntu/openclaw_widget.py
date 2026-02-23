@@ -41,8 +41,17 @@ window {
     padding: 14px 16px;
     margin: 6px 6px 2px 6px;
 }
-.logo-label {
-    font-size: 28px;
+.logo-badge {
+    background-color: #e8a020;
+    border-radius: 6px;
+    padding: 4px 8px;
+    min-width: 44px;
+    min-height: 44px;
+}
+.logo-text {
+    color: #1a1c1e;
+    font-size: 15px;
+    font-weight: bold;
 }
 .title-label {
     font-size: 15px;
@@ -307,7 +316,7 @@ class StatusCard:
 class OpenClawWidget(Gtk.Window):
 
     def __init__(self):
-        super().__init__(title="🦀 OpenClaw Control Panel")
+        super().__init__(title="OpenClaw Control Panel")
         self.set_default_size(420, -1)
         self.set_resizable(False)
         self.set_position(Gtk.WindowPosition.CENTER)
@@ -358,9 +367,13 @@ class OpenClawWidget(Gtk.Window):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         box.get_style_context().add_class("header-box")
 
-        logo = Gtk.Label(label="🦀")
-        logo.get_style_context().add_class("logo-label")
-        box.pack_start(logo, False, False, 0)
+        logo_badge = Gtk.Box()
+        logo_badge.get_style_context().add_class("logo-badge")
+        logo_badge.set_valign(Gtk.Align.CENTER)
+        logo_lbl = Gtk.Label(label="OC")
+        logo_lbl.get_style_context().add_class("logo-text")
+        logo_badge.add(logo_lbl)
+        box.pack_start(logo_badge, False, False, 0)
 
         text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         title = Gtk.Label(label="OpenClaw Control Panel")
