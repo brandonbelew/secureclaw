@@ -3,6 +3,12 @@
 
 set -e
 
+# Branch is passed as $1 (e.g. "dev"). Defaults to "main".
+BRANCH="${1:-main}"
+if [[ "$BRANCH" != "main" && "$BRANCH" != "dev" ]]; then
+    BRANCH="main"
+fi
+
 # ── Colors ────────────────────────────────────────────────────────────────────
 RESET=$'\033[0m'
 BOLD=$'\033[1m'
@@ -111,15 +117,12 @@ install_scripts() {
         chmod +x /usr/local/bin/post_lockdown_setup.py
     else
         # Repo not available locally — download from GitHub
-        REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/main"
-        if command -v curl &> /dev/null; then
-            curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py" -o /usr/local/bin/universal_vps_setup.py
-            curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py" -o /usr/local/bin/post_lockdown_setup.py
-        else
+        REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
+        if ! command -v curl &> /dev/null; then
             apt-get install -y -qq curl > /dev/null 2>&1
-            curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py" -o /usr/local/bin/universal_vps_setup.py
-            curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py" -o /usr/local/bin/post_lockdown_setup.py
         fi
+        curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py" -o /usr/local/bin/universal_vps_setup.py
+        curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py" -o /usr/local/bin/post_lockdown_setup.py
         chmod +x /usr/local/bin/universal_vps_setup.py
         chmod +x /usr/local/bin/post_lockdown_setup.py
     fi
@@ -130,22 +133,22 @@ install_scripts() {
 create_shortcuts() {
     print_step 4 4 "Creating shortcuts...                    "
 
-    cat > /usr/local/bin/vps-setup << 'EOF'
+    cat > /usr/local/bin/vps-setup << EOF
 #!/bin/bash
-REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/main"
-curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py?$(date +%s)" -o /usr/local/bin/universal_vps_setup.py \
+REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
+curl -fsSL "\$REPO_BASE/ubuntu/universal_vps_setup.py?$(date +%s)" -o /usr/local/bin/universal_vps_setup.py \
     && chmod +x /usr/local/bin/universal_vps_setup.py \
     || echo "  Warning: could not fetch latest script, running cached version"
-python3 /usr/local/bin/universal_vps_setup.py "$@"
+python3 /usr/local/bin/universal_vps_setup.py "\$@"
 EOF
 
-    cat > /usr/local/bin/vps-post-setup << 'EOF'
+    cat > /usr/local/bin/vps-post-setup << EOF
 #!/bin/bash
-REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/main"
-curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py?$(date +%s)" -o /usr/local/bin/post_lockdown_setup.py \
+REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
+curl -fsSL "\$REPO_BASE/ubuntu/post_lockdown_setup.py?$(date +%s)" -o /usr/local/bin/post_lockdown_setup.py \
     && chmod +x /usr/local/bin/post_lockdown_setup.py \
     || echo "  Warning: could not fetch latest script, running cached version"
-python3 /usr/local/bin/post_lockdown_setup.py "$@"
+python3 /usr/local/bin/post_lockdown_setup.py "\$@"
 EOF
 
     chmod +x /usr/local/bin/vps-setup
