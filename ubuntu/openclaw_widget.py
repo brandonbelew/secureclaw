@@ -347,6 +347,16 @@ class OpenClawWidget(Gtk.Window):
         self.tools_data = []
         self._tool_rows = {}
 
+        # Build lobster pixbuf once — reused at header (48px) and action rows (24px)
+        _logo_data = base64.b64decode(LOGO_B64)
+        _stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(_logo_data))
+        self.logo_pixbuf_48 = GdkPixbuf.Pixbuf.new_from_stream_at_scale(
+            _stream, 48, 48, True, None
+        )
+        self.logo_pixbuf_24 = self.logo_pixbuf_48.scale_simple(
+            24, 24, GdkPixbuf.InterpType.BILINEAR
+        )
+
         self._apply_css()
         self._build_ui()
 
@@ -388,10 +398,7 @@ class OpenClawWidget(Gtk.Window):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         box.get_style_context().add_class("header-box")
 
-        logo_data = base64.b64decode(LOGO_B64)
-        stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(logo_data))
-        pixbuf = GdkPixbuf.Pixbuf.new_from_stream_at_scale(stream, 48, 48, True, None)
-        logo_img = Gtk.Image.new_from_pixbuf(pixbuf)
+        logo_img = Gtk.Image.new_from_pixbuf(self.logo_pixbuf_48)
         logo_img.set_valign(Gtk.Align.CENTER)
         box.pack_start(logo_img, False, False, 0)
 
@@ -453,36 +460,44 @@ class OpenClawWidget(Gtk.Window):
 
         # Open Dashboard
         dash_row = self._make_action_row(
-            "🌐  Open Dashboard",
+            "Open Dashboard",
             f"http://127.0.0.1:{self.port}/",
-            self._on_open_dashboard
+            self._on_open_dashboard,
+            icon_pixbuf=self.logo_pixbuf_24
         )
         self.dash_sublabel = dash_row[1]
         wrapper.pack_start(dash_row[0], False, False, 0)
 
         # Install Plugin
         plugin_row = self._make_action_row(
-            "🔌  Install / Reinstall Plugin",
+            "Install / Reinstall Plugin",
             "Installs the OpenClaw browser extension",
-            self._on_install_plugin
+            self._on_install_plugin,
+            icon_pixbuf=self.logo_pixbuf_24
         )
         self.plugin_sublabel = plugin_row[1]
         wrapper.pack_start(plugin_row[0], False, False, 0)
 
         # Check for Updates
         update_row = self._make_action_row(
-            "⬆  Check for Updates",
+            "Check for Updates",
             "Checks openclaw update status",
-            self._on_check_updates
+            self._on_check_updates,
+            icon_pixbuf=self.logo_pixbuf_24
         )
         self.update_sublabel = update_row[1]
         wrapper.pack_start(update_row[0], False, False, 0)
 
         return wrapper
 
-    def _make_action_row(self, label_text, sub_text, callback):
+    def _make_action_row(self, label_text, sub_text, callback, icon_pixbuf=None):
         """Returns (row_box, sublabel_widget)."""
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
+        if icon_pixbuf is not None:
+            icon_img = Gtk.Image.new_from_pixbuf(icon_pixbuf)
+            icon_img.set_valign(Gtk.Align.CENTER)
+            row.pack_start(icon_img, False, False, 0)
 
         text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         text_box.set_hexpand(True)
