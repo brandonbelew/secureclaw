@@ -2,7 +2,7 @@
 # install_widget.sh — Standalone OpenClaw Control Panel installer
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/brandonbelew/secureclaw/main/ubuntu/install_widget.sh | sudo bash
-#   curl -fsSL https://raw.githubusercontent.com/brandonbelew/secureclaw/dev/ubuntu/install_widget.sh  | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/brandonbelew/secureclaw/dev/ubuntu/install_widget.sh  | sudo bash -s -- dev
 
 set -euo pipefail
 
@@ -14,6 +14,11 @@ SUDOERS_FILE="/etc/sudoers.d/openclaw-widget"
 
 # ── Detect branch ──────────────────────────────────────────────────────────────
 detect_branch() {
+    # If a branch argument was passed, use it
+    if [[ -n "${1:-}" ]]; then
+        echo "$1"
+        return
+    fi
     # If we're inside the repo, use git
     if git rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
         local branch
@@ -26,7 +31,7 @@ detect_branch() {
     echo "main"
 }
 
-BRANCH=$(detect_branch)
+BRANCH=$(detect_branch "${1:-}")
 echo "Using branch: $BRANCH"
 
 RAW_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
