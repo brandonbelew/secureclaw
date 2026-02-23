@@ -4,6 +4,7 @@ OpenClaw Control Panel Widget
 GTK3 desktop widget for OpenClaw service status and quick actions.
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -17,7 +18,39 @@ os.environ.setdefault("GTK_THEME", "Adwaita:dark")
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib, Gdk
+gi.require_version('GdkPixbuf', '2.0')
+from gi.repository import Gtk, GLib, Gdk, GdkPixbuf, Gio
+
+# Twemoji lobster emoji (🦞) — CC-BY 4.0 Twitter/Twemoji
+LOGO_B64 = (
+    "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"
+)
 
 REPO_OWNER = "brandonbelew"
 REPO_NAME = "secureclaw"
@@ -40,18 +73,6 @@ window {
     border-radius: 8px;
     padding: 14px 16px;
     margin: 6px 6px 2px 6px;
-}
-.logo-badge {
-    background-color: #e8a020;
-    border-radius: 6px;
-    padding: 4px 8px;
-    min-width: 44px;
-    min-height: 44px;
-}
-.logo-text {
-    color: #1a1c1e;
-    font-size: 15px;
-    font-weight: bold;
 }
 .title-label {
     font-size: 15px;
@@ -367,13 +388,12 @@ class OpenClawWidget(Gtk.Window):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         box.get_style_context().add_class("header-box")
 
-        logo_badge = Gtk.Box()
-        logo_badge.get_style_context().add_class("logo-badge")
-        logo_badge.set_valign(Gtk.Align.CENTER)
-        logo_lbl = Gtk.Label(label="OC")
-        logo_lbl.get_style_context().add_class("logo-text")
-        logo_badge.add(logo_lbl)
-        box.pack_start(logo_badge, False, False, 0)
+        logo_data = base64.b64decode(LOGO_B64)
+        stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(logo_data))
+        pixbuf = GdkPixbuf.Pixbuf.new_from_stream_at_scale(stream, 48, 48, True, None)
+        logo_img = Gtk.Image.new_from_pixbuf(pixbuf)
+        logo_img.set_valign(Gtk.Align.CENTER)
+        box.pack_start(logo_img, False, False, 0)
 
         text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         title = Gtk.Label(label="OpenClaw Control Panel")
