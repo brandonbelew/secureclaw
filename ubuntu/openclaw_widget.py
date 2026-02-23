@@ -93,9 +93,15 @@ window {
     padding: 6px 10px;
     font-size: 12px;
 }
+.action-button label {
+    color: #e0e0e0;
+}
 .action-button:hover {
     background-color: #383c42;
     border-color: #e8a020;
+}
+.action-button:hover label {
+    color: #ffffff;
 }
 .action-label {
     font-size: 12px;
@@ -131,8 +137,14 @@ window {
     padding: 2px 8px;
     font-size: 10px;
 }
+.refresh-button label {
+    color: #888888;
+}
 .refresh-button:hover {
     border-color: #e8a020;
+    color: #e0e0e0;
+}
+.refresh-button:hover label {
     color: #e0e0e0;
 }
 .tools-section {
@@ -168,6 +180,9 @@ window {
     color: #4caf50;
     padding: 2px 8px;
     font-size: 10px;
+}
+.tool-install-btn label {
+    color: #4caf50;
 }
 .tool-install-btn:hover {
     background-color: #2a5a2a;
@@ -683,8 +698,8 @@ class OpenClawWidget(Gtk.Window):
 
         dialog = Gtk.Dialog(
             title="Install Browser Extension",
-            parent=self,
-            flags=Gtk.DialogFlags.MODAL
+            transient_for=self,
+            modal=True
         )
         dialog.set_default_size(380, -1)
         dialog.get_content_area().set_spacing(8)
@@ -761,19 +776,31 @@ class OpenClawWidget(Gtk.Window):
 
         # Detect update keywords
         low = result.lower()
-        if any(k in low for k in ("update available", "new version", "upgrade")):
+        update_available = any(k in low for k in ("update available", "new version", "upgrade"))
+        if update_available:
             self.update_sublabel.set_text(f"Update available! (checked {now})")
 
         dialog = Gtk.MessageDialog(
-            parent=self,
-            flags=Gtk.DialogFlags.MODAL,
+            transient_for=self,
+            modal=True,
             message_type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.OK,
+            buttons=Gtk.ButtonsType.NONE,
             text="OpenClaw Update Status"
         )
         dialog.format_secondary_text(result)
-        dialog.run()
+        dialog.add_button("Dismiss", Gtk.ResponseType.CLOSE)
+        if update_available:
+            dialog.add_button("Update Now", Gtk.ResponseType.ACCEPT)
+            dialog.set_default_response(Gtk.ResponseType.ACCEPT)
+
+        response = dialog.run()
         dialog.destroy()
+
+        if response == Gtk.ResponseType.ACCEPT:
+            run_command(
+                "xfce4-terminal --title='OpenClaw Update' "
+                "--command='bash -c \"openclaw update; echo; echo Done -- press Enter; read\"'"
+            )
         return False
 
     def _on_install_tool(self, tool):
