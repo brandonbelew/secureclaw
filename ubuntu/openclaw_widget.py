@@ -191,6 +191,13 @@ window {
 """
 
 
+def _force_color(widget, hex_color):
+    """Force a foreground color on a widget, bypassing CSS and themes."""
+    rgba = Gdk.RGBA()
+    rgba.parse(hex_color)
+    widget.override_color(Gtk.StateFlags.NORMAL, rgba)
+
+
 def get_repo_branch():
     """Return the branch this widget was installed from."""
     if REPO_BRANCH_OVERRIDE and REPO_BRANCH_OVERRIDE in ("main", "dev"):
@@ -452,8 +459,8 @@ class OpenClawWidget(Gtk.Window):
         row.pack_start(text_box, True, True, 0)
 
         btn = Gtk.Button()
-        btn_lbl = Gtk.Label()
-        btn_lbl.set_markup('<span foreground="#e0e0e0">Go</span>')
+        btn_lbl = Gtk.Label(label="Go")
+        _force_color(btn_lbl, "#e0e0e0")
         btn.add(btn_lbl)
         btn.get_style_context().add_class("action-button")
         btn.connect("clicked", callback)
@@ -538,8 +545,8 @@ class OpenClawWidget(Gtk.Window):
             row.pack_start(tag, False, False, 0)
         else:
             btn = Gtk.Button()
-            btn_lbl = Gtk.Label()
-            btn_lbl.set_markup('<span foreground="#4caf50">Install</span>')
+            btn_lbl = Gtk.Label(label="Install")
+            _force_color(btn_lbl, "#4caf50")
             btn.add(btn_lbl)
             btn.get_style_context().add_class("tool-install-btn")
             btn.connect("clicked", lambda b, t=tool: self._on_install_tool(t))
@@ -570,8 +577,8 @@ class OpenClawWidget(Gtk.Window):
         box.pack_start(self.uptime_label, True, False, 0)
 
         refresh_btn = Gtk.Button()
-        refresh_lbl = Gtk.Label()
-        refresh_lbl.set_markup('<span foreground="#aaaaaa">Refresh</span>')
+        refresh_lbl = Gtk.Label(label="Refresh")
+        _force_color(refresh_lbl, "#aaaaaa")
         refresh_btn.add(refresh_lbl)
         refresh_btn.get_style_context().add_class("refresh-button")
         refresh_btn.connect("clicked", lambda b: self._schedule_refresh())
