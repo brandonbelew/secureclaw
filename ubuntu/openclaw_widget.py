@@ -453,6 +453,7 @@ class OpenClawWidget(Gtk.Window):
 
         btn = Gtk.Button(label="Go")
         btn.get_style_context().add_class("action-button")
+        btn.get_child().set_markup('<span foreground="#e0e0e0">Go</span>')
         btn.connect("clicked", callback)
         row.pack_start(btn, False, False, 0)
 
@@ -536,6 +537,7 @@ class OpenClawWidget(Gtk.Window):
         else:
             btn = Gtk.Button(label="Install")
             btn.get_style_context().add_class("tool-install-btn")
+            btn.get_child().set_markup('<span foreground="#4caf50">Install</span>')
             btn.connect("clicked", lambda b, t=tool: self._on_install_tool(t))
             row.pack_start(btn, False, False, 0)
 
@@ -565,6 +567,7 @@ class OpenClawWidget(Gtk.Window):
 
         refresh_btn = Gtk.Button(label="Refresh")
         refresh_btn.get_style_context().add_class("refresh-button")
+        refresh_btn.get_child().set_markup('<span foreground="#888888">Refresh</span>')
         refresh_btn.connect("clicked", lambda b: self._schedule_refresh())
         box.pack_end(refresh_btn, False, False, 0)
 
