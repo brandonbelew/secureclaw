@@ -584,17 +584,29 @@ class UniversalVPSSetup:
         )
 
         if pwd_choice == 1:
-            while True:
+            max_attempts = 3
+            attempt = 0
+            password = None
+            while attempt < max_attempts:
+                attempt += 1
                 pwd1 = getpass.getpass(f"\n{Colors.CYAN}Enter your password: {Colors.ENDC}")
                 if not pwd1:
                     print(f"{Colors.WARNING}Password cannot be empty.{Colors.ENDC}")
+                    attempt -= 1  # don't count empty entry as an attempt
                     continue
                 pwd2 = getpass.getpass(f"{Colors.CYAN}Confirm your password: {Colors.ENDC}")
                 if pwd1 != pwd2:
-                    print(f"{Colors.WARNING}Passwords do not match. Try again.{Colors.ENDC}")
+                    remaining = max_attempts - attempt
+                    if remaining > 0:
+                        print(f"{Colors.WARNING}Passwords do not match. {remaining} attempt(s) remaining.{Colors.ENDC}")
                     continue
                 password = pwd1
                 break
+
+            if password is None:
+                print(f"{Colors.WARNING}Passwords did not match after {max_attempts} attempts — using the generated password instead.{Colors.ENDC}")
+                password = generated_password
+
             show_cred_box(username, password, "  Save this password before continuing!")
         else:
             password = generated_password
@@ -1162,14 +1174,17 @@ TAILSCALE TROUBLESHOOTING:
         self._save_state(server_locked_down=True)
 
         if self.initial_access_method == "SSH":
-            print(f"\n{Colors.FAIL}  ✗  SSH CONNECTION WILL BE LOST IN 10 SECONDS!{Colors.ENDC}")
+            print(f"\n{Colors.WARNING}  ⚠  Your connection may disconnect — this is normal.{Colors.ENDC}")
             print(f"\n{Colors.BOLD}  What to do next:{Colors.ENDC}")
-            print(f"{Colors.WARNING}  1. Reconnect via SSH using your Tailscale IP: {self.tailscale_ip}{Colors.ENDC}")
-            print(f"{Colors.WARNING}  2. Run: sudo vps-post-setup{Colors.ENDC}")
-            print(f"{Colors.WARNING}     (this finishes installing OpenClaw and Chrome){Colors.ENDC}\n")
+            print(f"{Colors.WARNING}  • If you stay connected: run sudo vps-post-setup right here in this window.{Colors.ENDC}")
+            print(f"{Colors.WARNING}  • If you get disconnected: reconnect via SSH to {self.tailscale_ip}{Colors.ENDC}")
+            print(f"{Colors.WARNING}    then run: sudo vps-post-setup{Colors.ENDC}")
+            print(f"{Colors.WARNING}    (this finishes installing OpenClaw and Chrome){Colors.ENDC}")
+            print(f"\n{Colors.FAIL}  ✗  IMPORTANT: Do NOT run sudo vps-post-setup inside an RDP session.{Colors.ENDC}")
+            print(f"{Colors.FAIL}     Use this console or a direct SSH terminal only.{Colors.ENDC}\n")
 
             for i in range(10, 0, -1):
-                print(f"{Colors.WARNING}  Disconnecting in {i}...{Colors.ENDC}")
+                print(f"{Colors.WARNING}  Closing connection in {i}...{Colors.ENDC}")
                 time.sleep(1)
 
         elif self.initial_access_method == "RDP":
@@ -1800,6 +1815,22 @@ WantedBy=timers.target
 • UFW firewall active with restrictive rules
 • All connections must use Tailscale VPN
 
+{Colors.FAIL}{Colors.BOLD}╔══════════════════════════════════════════════════════════════╗
+║       !! ACTION REQUIRED: TAILSCALE KEY EXPIRY !!            ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  Tailscale keys expire after 180 days by default.           ║
+║  When your key expires you will be LOCKED OUT of your        ║
+║  VPS with no way to reconnect remotely.                      ║
+║                                                              ║
+║  Disable key expiry NOW — takes 30 seconds:                  ║
+║                                                              ║
+║  1. Go to: https://login.tailscale.com/admin/machines        ║
+║  2. Find this server and click the  ···  menu                ║
+║  3. Click "Disable key expiry"                               ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝{Colors.ENDC}
+
 {Colors.GREEN}Setup completed successfully!{Colors.ENDC}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
@@ -1867,7 +1898,10 @@ WantedBy=timers.target
                     if self.lockdown_server():
                         if self.initial_access_method == "SSH":
                             print(f"\n{Colors.GREEN}{Colors.BOLD}  Phase 1 Complete!{Colors.ENDC}")
-                            print(f"{Colors.WARNING}  SSH to {self.tailscale_ip} and run: sudo vps-post-setup{Colors.ENDC}")
+                            print(f"{Colors.WARNING}  • If you stayed connected: run sudo vps-post-setup right here in this window.{Colors.ENDC}")
+                            print(f"{Colors.WARNING}  • If you got disconnected: reconnect via SSH to {self.tailscale_ip}{Colors.ENDC}")
+                            print(f"{Colors.WARNING}    then run: sudo vps-post-setup{Colors.ENDC}")
+                            print(f"{Colors.FAIL}  IMPORTANT: Do NOT run sudo vps-post-setup inside an RDP session.{Colors.ENDC}")
                             return
 
                         elif self.initial_access_method == "RDP":

@@ -11,6 +11,10 @@ import subprocess
 import time
 from pathlib import Path
 
+# Injected at install time by vps-post-setup shortcut via sed.
+# When None, _get_repo_branch() falls back to git detection.
+REPO_BRANCH_OVERRIDE = None  # injected at install time
+
 class Colors:
     HEADER = '\033[95m'
     BLUE = '\033[94m'
@@ -83,6 +87,61 @@ class PostLockdownSetup:
         except Exception as e:
             self.log(f"Failed to verify Tailscale connection: {e}", "ERROR")
             return False
+
+    def configure_hostname(self):
+        """Interactively set a memorable system hostname and sync it to Tailscale."""
+        import re
+        print(f"\n{Colors.HEADER}=== SET SERVER HOSTNAME ==={Colors.ENDC}")
+
+        try:
+            current = subprocess.run(
+                ["hostname"], capture_output=True, text=True
+            ).stdout.strip()
+        except Exception:
+            current = "unknown"
+
+        print(f"""
+{Colors.CYAN}Give your server a memorable name. It will appear in:{Colors.ENDC}
+  • Your Tailscale admin console  (tailscale.com/admin/machines)
+  • Your terminal prompt
+  • The OpenClaw Control Panel widget
+
+{Colors.DIM}Examples:  trade-bot-1   openclaw-prod   my-vps   btc-server{Colors.ENDC}
+
+Current hostname: {Colors.BOLD}{current}{Colors.ENDC}
+""")
+
+        name = input(
+            f"{Colors.CYAN}Enter new hostname (or press Enter to keep '{current}'): {Colors.ENDC}"
+        ).strip()
+
+        if not name:
+            self.log(f"Keeping existing hostname: {current}", "INFO")
+            return
+
+        # Sanitize to RFC 1123: lowercase, alphanumeric + hyphens, no leading/trailing hyphens
+        name = re.sub(r'[^a-z0-9-]', '-', name.lower()).strip('-')
+        if not name:
+            self.log("Invalid hostname entered, keeping existing", "WARNING")
+            return
+
+        # Set system hostname
+        self.run_command(f"hostnamectl set-hostname {name}")
+        self.log(f"System hostname set to: {name}", "SUCCESS")
+
+        # Push to Tailscale (tailscale set available since Tailscale 1.42)
+        result = subprocess.run(
+            ["tailscale", "set", f"--hostname={name}"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            self.log(f"Tailscale hostname updated to: {name}", "SUCCESS")
+        else:
+            self.log(
+                f"Could not update Tailscale hostname automatically. "
+                f"Set it manually: tailscale.com/admin/machines → ... → Edit name",
+                "WARNING"
+            )
 
     def test_lockdown_status(self):
         """Verify server lockdown is working"""
@@ -595,6 +654,110 @@ WantedBy=timers.target
         self.run_command("systemctl start chrome-cleanup.timer")
         self.log("Chrome cleanup timer enabled (runs daily)", "SUCCESS")
 
+    def _get_repo_branch(self):
+        """Return the active branch. Override injected at install time takes priority."""
+        if REPO_BRANCH_OVERRIDE in ("main", "dev"):
+            return REPO_BRANCH_OVERRIDE
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True,
+                cwd=os.path.dirname(os.path.abspath(__file__))
+            )
+            branch = result.stdout.strip()
+            return branch if branch in ("main", "dev") else "main"
+        except Exception:
+            return "main"
+
+    def install_openclaw_widget(self):
+        """Install the OpenClaw Control Panel desktop widget."""
+        print(f"\n{Colors.HEADER}=== OPENCLAW CONTROL PANEL ==={Colors.ENDC}")
+        self.log("Installing OpenClaw Control Panel...")
+
+        branch = self._get_repo_branch()
+        self.log(f"Using branch: {branch}")
+
+        raw_base = f"https://raw.githubusercontent.com/brandonbelew/secureclaw/{branch}"
+        widget_url = f"{raw_base}/ubuntu/openclaw_widget.py"
+        install_bin = "/usr/local/bin/openclaw-widget"
+
+        # Download widget script
+        self.run_command(f"wget -q -O {install_bin} {widget_url}")
+        os.chmod(install_bin, 0o755)
+        # Inject branch so widget fetches manifest from the correct branch at runtime
+        self.run_command(
+            f"sed -i 's/^REPO_BRANCH_OVERRIDE = None.*$/REPO_BRANCH_OVERRIDE = \"{branch}\"/' {install_bin}"
+        )
+        self.log("Widget script downloaded and made executable", "SUCCESS")
+
+        # Install GTK3 Python bindings (pre-installed on XFCE Ubuntu, but ensure present)
+        self.run_command("apt-get install -y python3-gi gir1.2-gtk-3.0")
+        self.log("GTK3 Python bindings installed", "SUCCESS")
+
+        # Sudoers entry for passwordless UFW status check
+        sudoers_content = (
+            "# Allow sudo group to check UFW status without password (used by openclaw-widget)\n"
+            "%sudo ALL=(ALL) NOPASSWD: /usr/sbin/ufw status\n"
+        )
+        sudoers_path = "/etc/sudoers.d/openclaw-widget"
+        with open(sudoers_path, "w") as f:
+            f.write(sudoers_content)
+        os.chmod(sudoers_path, 0o440)
+        self.log("Sudoers entry written for UFW status check", "SUCCESS")
+
+        # System-wide application menu entry
+        desktop_dir = Path("/usr/local/share/applications")
+        desktop_dir.mkdir(parents=True, exist_ok=True)
+        desktop_content = (
+            "[Desktop Entry]\n"
+            "Name=OpenClaw Control Panel\n"
+            "Comment=OpenClaw service status and launcher\n"
+            "Exec=/usr/local/bin/openclaw-widget\n"
+            "Icon=network-server\n"
+            "Terminal=false\n"
+            "Type=Application\n"
+            "Categories=Network;System;\n"
+            "StartupNotify=true\n"
+            "X-GNOME-Autostart-enabled=true\n"
+        )
+        system_desktop_path = desktop_dir / "openclaw-widget.desktop"
+        with open(system_desktop_path, "w") as f:
+            f.write(desktop_content)
+        self.log("Application menu entry written", "SUCCESS")
+
+        # Per-user autostart entries
+        for user_dir in Path("/home").iterdir():
+            if not user_dir.is_dir():
+                continue
+            try:
+                uid = user_dir.stat().st_uid
+            except Exception:
+                continue
+            if uid < 1000:
+                continue
+
+            username = user_dir.name
+            autostart_dir = user_dir / ".config" / "autostart"
+            autostart_dir.mkdir(parents=True, exist_ok=True)
+
+            autostart_path = autostart_dir / "openclaw-widget.desktop"
+            with open(autostart_path, "w") as f:
+                f.write(desktop_content)
+            self.run_command(f"chown -R {username}:{username} {autostart_dir}")
+
+            # Desktop shortcut
+            desktop_dir = user_dir / "Desktop"
+            desktop_dir.mkdir(exist_ok=True)
+            desktop_shortcut = desktop_dir / "openclaw-widget.desktop"
+            with open(desktop_shortcut, "w") as f:
+                f.write(desktop_content)
+            self.run_command(f"chmod +x {desktop_shortcut}")
+            self.run_command(f"chown {username}:{username} {desktop_shortcut}")
+
+            self.log(f"Autostart + desktop shortcut created for {username}", "SUCCESS")
+
+        self.log("OpenClaw Control Panel installed", "SUCCESS")
+
     def create_user_shortcuts(self):
         """Create desktop shortcuts for regular users"""
         print(f"\n{Colors.HEADER}=== CREATING USER SHORTCUTS ==={Colors.ENDC}")
@@ -733,12 +896,29 @@ not a substitute for good security practices:
      {Colors.DIM}to verify firewall rules remain intact{Colors.ENDC}
   {Colors.BOLD}•{Colors.ENDC}  Keep your server patched:  sudo apt upgrade
 
+{Colors.FAIL}{Colors.BOLD}╔══════════════════════════════════════════════════════════════╗
+║       !! ACTION REQUIRED: TAILSCALE KEY EXPIRY !!            ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  Tailscale keys expire after 180 days by default.           ║
+║  When your key expires you will be LOCKED OUT of your        ║
+║  VPS with no way to reconnect remotely.                      ║
+║                                                              ║
+║  Disable key expiry NOW — takes 30 seconds:                  ║
+║                                                              ║
+║  1. Go to: https://login.tailscale.com/admin/machines        ║
+║  2. Find this server and click the  ···  menu                ║
+║  3. Click "Disable key expiry"                               ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝{Colors.ENDC}
+
 {Colors.CYAN}Next Steps:{Colors.ENDC}
-1. Connect via RDP: {tailscale_ip}:3389
-2. Open a terminal and run: {Colors.BOLD}openclaw onboard{Colors.ENDC}
+1. {Colors.BOLD}Disable Tailscale key expiry{Colors.ENDC} (see above — do this first!)
+2. Connect via RDP: {tailscale_ip}:3389
+3. Open a terminal and run: {Colors.BOLD}openclaw onboard{Colors.ENDC}
    {Colors.DIM}This completes the OpenClaw onboarding (API keys, preferences, etc.){Colors.ENDC}
-3. OpenClaw will then continue running as a background service automatically
-4. Google Chrome is available on your desktop
+4. OpenClaw will then continue running as a background service automatically
+5. Google Chrome is available on your desktop
 
 {Colors.GREEN}Setup logs saved to: /var/log/vps_post_setup.log{Colors.ENDC}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -768,11 +948,13 @@ not a substitute for good security practices:
                 print(f"{Colors.FAIL}Tailscale connection could not be verified!{Colors.ENDC}")
                 print(f"{Colors.WARNING}Continuing anyway, but please verify your connection.{Colors.ENDC}")
             
+            self.configure_hostname()
             self.test_lockdown_status()
             self.install_openclaw()
             self.install_chrome()
             self.install_chrome_cleanup()
             self.install_security_check()
+            self.install_openclaw_widget()
             self.create_user_shortcuts()
             self.create_final_report()
             

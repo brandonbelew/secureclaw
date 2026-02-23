@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=OpenClaw Control Panel
+Comment=OpenClaw service status and launcher
+Exec=/usr/local/bin/openclaw-widget
+Icon=network-server
+Terminal=false
+Type=Application
+Categories=Network;System;
+StartupNotify=true
+X-GNOME-Autostart-enabled=true
