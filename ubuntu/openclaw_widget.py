@@ -4,16 +4,20 @@ OpenClaw Control Panel Widget
 GTK3 desktop widget for OpenClaw service status and quick actions.
 """
 
-import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib, Gdk
-
 import json
 import os
 import subprocess
 import threading
 import time
 from pathlib import Path
+
+# Must be set before importing GTK — forces Adwaita dark variant even in
+# xrdp sessions that have no settings daemon (xfsettingsd/gsd-xsettings).
+os.environ.setdefault("GTK_THEME", "Adwaita:dark")
+
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, GLib, Gdk
 
 REPO_OWNER = "brandonbelew"
 REPO_NAME = "secureclaw"
@@ -87,6 +91,7 @@ window {
     color: #888888;
 }
 .action-button {
+    background-image: none;
     background-color: #2a2d32;
     border: 1px solid #383c42;
     border-radius: 6px;
@@ -98,6 +103,7 @@ window {
     color: #e0e0e0;
 }
 .action-button:hover {
+    background-image: none;
     background-color: #383c42;
     border-color: #e8a020;
 }
@@ -131,17 +137,19 @@ window {
     color: #4caf50;
 }
 .refresh-button {
+    background-image: none;
     background-color: #2a2d32;
     border: 1px solid #383c42;
     border-radius: 4px;
-    color: #888888;
+    color: #aaaaaa;
     padding: 2px 8px;
     font-size: 10px;
 }
 .refresh-button label {
-    color: #888888;
+    color: #aaaaaa;
 }
 .refresh-button:hover {
+    background-image: none;
     border-color: #e8a020;
     color: #e0e0e0;
 }
@@ -175,6 +183,7 @@ window {
     color: #4caf50;
 }
 .tool-install-btn {
+    background-image: none;
     background-color: #1a3a1a;
     border: 1px solid #2a5a2a;
     border-radius: 4px;
@@ -186,16 +195,11 @@ window {
     color: #4caf50;
 }
 .tool-install-btn:hover {
+    background-image: none;
     background-color: #2a5a2a;
 }
 """
 
-
-def _force_color(widget, hex_color):
-    """Force a foreground color on a widget, bypassing CSS and themes."""
-    rgba = Gdk.RGBA()
-    rgba.parse(hex_color)
-    widget.override_color(Gtk.StateFlags.NORMAL, rgba)
 
 
 def get_repo_branch():
@@ -325,6 +329,11 @@ class OpenClawWidget(Gtk.Window):
         GLib.timeout_add_seconds(30, self._auto_refresh)
 
     def _apply_css(self):
+        # Belt-and-suspenders: also set programmatically for environments
+        # where the env var alone isn't picked up after process start.
+        settings = Gtk.Settings.get_default()
+        settings.set_property("gtk-application-prefer-dark-theme", True)
+
         provider = Gtk.CssProvider()
         provider.load_from_data(DARK_CSS.encode())
         Gtk.StyleContext.add_provider_for_screen(
@@ -458,10 +467,7 @@ class OpenClawWidget(Gtk.Window):
 
         row.pack_start(text_box, True, True, 0)
 
-        btn = Gtk.Button()
-        btn_lbl = Gtk.Label(label="Go")
-        _force_color(btn_lbl, "#e0e0e0")
-        btn.add(btn_lbl)
+        btn = Gtk.Button(label="Go")
         btn.get_style_context().add_class("action-button")
         btn.connect("clicked", callback)
         row.pack_start(btn, False, False, 0)
@@ -544,10 +550,7 @@ class OpenClawWidget(Gtk.Window):
             tag.get_style_context().add_class("tool-installed")
             row.pack_start(tag, False, False, 0)
         else:
-            btn = Gtk.Button()
-            btn_lbl = Gtk.Label(label="Install")
-            _force_color(btn_lbl, "#4caf50")
-            btn.add(btn_lbl)
+            btn = Gtk.Button(label="Install")
             btn.get_style_context().add_class("tool-install-btn")
             btn.connect("clicked", lambda b, t=tool: self._on_install_tool(t))
             row.pack_start(btn, False, False, 0)
@@ -576,10 +579,7 @@ class OpenClawWidget(Gtk.Window):
         self.uptime_label.get_style_context().add_class("uptime-badge")
         box.pack_start(self.uptime_label, True, False, 0)
 
-        refresh_btn = Gtk.Button()
-        refresh_lbl = Gtk.Label(label="Refresh")
-        _force_color(refresh_lbl, "#aaaaaa")
-        refresh_btn.add(refresh_lbl)
+        refresh_btn = Gtk.Button(label="Refresh")
         refresh_btn.get_style_context().add_class("refresh-button")
         refresh_btn.connect("clicked", lambda b: self._schedule_refresh())
         box.pack_end(refresh_btn, False, False, 0)
