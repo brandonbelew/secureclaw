@@ -44,6 +44,8 @@ apt-get install -y python3-gi gir1.2-gtk-3.0 wget >/dev/null
 echo "[2/7] Downloading openclaw-widget..."
 wget -q -O "$INSTALL_BIN" "${RAW_BASE}/ubuntu/openclaw_widget.py"
 chmod +x "$INSTALL_BIN"
+# Inject branch so widget can fetch manifest from the correct branch at runtime
+sed -i "s/^REPO_BRANCH_OVERRIDE = None.*$/REPO_BRANCH_OVERRIDE = \"${BRANCH}\"/" "$INSTALL_BIN"
 
 # ── Sudoers entry for UFW status ───────────────────────────────────────────────
 echo "[3/7] Writing sudoers entry..."
@@ -69,8 +71,8 @@ StartupNotify=true
 X-GNOME-Autostart-enabled=true
 EOF
 
-# ── Per-user autostart entries ─────────────────────────────────────────────────
-echo "[5/7] Creating per-user autostart entries..."
+# ── Per-user autostart + desktop shortcut ─────────────────────────────────────
+echo "[5/7] Creating per-user autostart and desktop entries..."
 
 DESKTOP_CONTENT="[Desktop Entry]
 Name=OpenClaw Control Panel
@@ -89,11 +91,20 @@ for user_dir in /home/*/; do
     uid=$(id -u "$username" 2>/dev/null || echo 0)
     (( uid < 1000 )) && continue
 
+    # Autostart
     autostart_dir="${user_dir}.config/autostart"
     mkdir -p "$autostart_dir"
     echo "$DESKTOP_CONTENT" > "${autostart_dir}/openclaw-widget.desktop"
     chown -R "${username}:${username}" "$autostart_dir"
-    echo "  → autostart entry created for $username"
+
+    # Desktop shortcut
+    desktop_dir="${user_dir}Desktop"
+    mkdir -p "$desktop_dir"
+    echo "$DESKTOP_CONTENT" > "${desktop_dir}/openclaw-widget.desktop"
+    chmod +x "${desktop_dir}/openclaw-widget.desktop"
+    chown "${username}:${username}" "${desktop_dir}/openclaw-widget.desktop"
+
+    echo "  -> autostart + desktop shortcut created for $username"
 done
 
 echo "[6/7] Updating desktop database..."

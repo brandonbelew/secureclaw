@@ -623,6 +623,10 @@ WantedBy=timers.target
         # Download widget script
         self.run_command(f"wget -q -O {install_bin} {widget_url}")
         os.chmod(install_bin, 0o755)
+        # Inject branch so widget fetches manifest from the correct branch at runtime
+        self.run_command(
+            f"sed -i 's/^REPO_BRANCH_OVERRIDE = None.*$/REPO_BRANCH_OVERRIDE = \"{branch}\"/' {install_bin}"
+        )
         self.log("Widget script downloaded and made executable", "SUCCESS")
 
         # Install GTK3 Python bindings (pre-installed on XFCE Ubuntu, but ensure present)
@@ -678,9 +682,18 @@ WantedBy=timers.target
             autostart_path = autostart_dir / "openclaw-widget.desktop"
             with open(autostart_path, "w") as f:
                 f.write(desktop_content)
-
             self.run_command(f"chown -R {username}:{username} {autostart_dir}")
-            self.log(f"Autostart entry created for {username}", "SUCCESS")
+
+            # Desktop shortcut
+            desktop_dir = user_dir / "Desktop"
+            desktop_dir.mkdir(exist_ok=True)
+            desktop_shortcut = desktop_dir / "openclaw-widget.desktop"
+            with open(desktop_shortcut, "w") as f:
+                f.write(desktop_content)
+            self.run_command(f"chmod +x {desktop_shortcut}")
+            self.run_command(f"chown {username}:{username} {desktop_shortcut}")
+
+            self.log(f"Autostart + desktop shortcut created for {username}", "SUCCESS")
 
         self.log("OpenClaw Control Panel installed", "SUCCESS")
 

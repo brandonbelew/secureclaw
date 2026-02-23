@@ -18,6 +18,7 @@ from pathlib import Path
 REPO_OWNER = "brandonbelew"
 REPO_NAME = "secureclaw"
 DEFAULT_PORT = 18789
+REPO_BRANCH_OVERRIDE = None  # injected at install time by install_widget.sh
 
 DARK_CSS = """
 window {
@@ -191,17 +192,10 @@ window {
 
 
 def get_repo_branch():
-    """Detect the repo branch from git, defaulting to main."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True,
-            cwd=os.path.dirname(os.path.abspath(__file__))
-        )
-        branch = result.stdout.strip()
-        return branch if branch in ("main", "dev") else "main"
-    except Exception:
-        return "main"
+    """Return the branch this widget was installed from."""
+    if REPO_BRANCH_OVERRIDE and REPO_BRANCH_OVERRIDE in ("main", "dev"):
+        return REPO_BRANCH_OVERRIDE
+    return "main"
 
 
 def get_dashboard_port():
@@ -492,8 +486,16 @@ class OpenClawWidget(Gtk.Window):
             self.tools_list_box.remove(child)
         self._tool_rows = {}
 
-        if not tools:
+        if tools is None:
             lbl = Gtk.Label(label="Unable to check for tools")
+            lbl.get_style_context().add_class("action-sublabel")
+            lbl.set_halign(Gtk.Align.START)
+            self.tools_list_box.pack_start(lbl, False, False, 0)
+            self.tools_list_box.show_all()
+            return
+
+        if len(tools) == 0:
+            lbl = Gtk.Label(label="No tools available yet")
             lbl.get_style_context().add_class("action-sublabel")
             lbl.set_halign(Gtk.Align.START)
             self.tools_list_box.pack_start(lbl, False, False, 0)
