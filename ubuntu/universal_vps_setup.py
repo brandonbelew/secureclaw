@@ -1219,16 +1219,9 @@ TAILSCALE TROUBLESHOOTING:
         self.create_user_shortcuts()
 
     def install_openclaw(self):
-        """Install OpenClaw AI assistant and run it as a systemd service"""
+        """Install OpenClaw using the official installer"""
         if self._step_done("openclaw_installed"):
             self.log("OpenClaw already installed — skipping", "SUCCESS")
-            return
-
-        # Also check if the service is already running
-        result = self.run_command("systemctl is-active openclaw", check=False)
-        if result.stdout.strip() == "active":
-            self.log("OpenClaw service is already running — skipping", "SUCCESS")
-            self._save_state(openclaw_installed=True)
             return
 
         print(f"\n{Colors.HEADER}=== OPENCLAW AI INSTALLATION ==={Colors.ENDC}")
@@ -1236,63 +1229,29 @@ TAILSCALE TROUBLESHOOTING:
 
         install_user = self.rdp_username or "root"
 
-        # Install Node.js v22+ and build tools (needed to compile native modules)
-        self.log("Installing Node.js v22 and build tools...")
-        self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
-        self.run_command("apt-get install -y nodejs build-essential")
+        # Remove legacy system service if present from a previous install
+        legacy_service = Path("/etc/systemd/system/openclaw.service")
+        if legacy_service.exists():
+            self.run_command("systemctl stop openclaw", check=False)
+            self.run_command("systemctl disable openclaw", check=False)
+            legacy_service.unlink()
+            self.run_command("systemctl daemon-reload")
+            self.log("Removed legacy openclaw system service", "SUCCESS")
 
-        # The openclaw.ai installer script requires an interactive TTY (it uses
-        # gum for UI and npm has TTY requirements) which we don't have in a su
-        # subprocess. Install openclaw directly via npm instead.
-        npm_global = f"/home/{install_user}/.npm-global"
-
-        # Create the npm global directory as root and hand it to the user
-        self.run_command(f"mkdir -p {npm_global}/lib {npm_global}/bin")
-        self.run_command(f"chown -R {install_user}:{install_user} {npm_global}")
-
-        # Point npm at our pre-created directory
-        self.run_command(f"su - {install_user} -c 'npm config set prefix {npm_global}'")
-
-        # Install openclaw via npm
-        self.log("Installing OpenClaw via npm...")
+        # Run the official OpenClaw installer as the target user.
+        # --no-onboard skips the interactive wizard; the installer handles
+        # Node.js detection, npm install, and gateway service registration.
+        self.log("Running official OpenClaw installer...")
         self.run_command(
-            f"su - {install_user} -c 'npm install -g openclaw@latest'",
+            f"su - {install_user} -c "
+            f"'curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard'",
             capture_output=False
         )
 
-        openclaw_bin = f"{npm_global}/bin/openclaw"
-        if not Path(openclaw_bin).exists():
-            self.log("Could not locate openclaw binary after installation", "ERROR")
-            raise FileNotFoundError("openclaw binary not found")
-
-        self.log(f"OpenClaw binary found at: {openclaw_bin}", "SUCCESS")
-        npm_bin_dir = str(Path(openclaw_bin).parent)
-
-        service_content = f"""\
-[Unit]
-Description=OpenClaw AI Assistant
-After=network.target
-
-[Service]
-Type=simple
-User={install_user}
-ExecStart={openclaw_bin} gateway
-Restart=on-failure
-RestartSec=5
-Environment=HOME=/home/{install_user}
-Environment=PATH={npm_bin_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-[Install]
-WantedBy=multi-user.target
-"""
-        with open("/etc/systemd/system/openclaw.service", "w") as f:
-            f.write(service_content)
-
-        self.run_command("systemctl daemon-reload")
-        self.service_command("enable", "openclaw")
-        self.service_command("start", "openclaw")
-
-        self.log("OpenClaw service enabled and started", "SUCCESS")
+        # Enable linger so the user's systemd services start at boot
+        # without requiring an active login session
+        self.run_command(f"loginctl enable-linger {install_user}")
+        self.log("OpenClaw installed and gateway service registered", "SUCCESS")
         self._save_state(openclaw_installed=True)
 
     def install_chrome(self):
