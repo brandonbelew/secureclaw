@@ -136,7 +136,7 @@ create_shortcuts() {
     cat > /usr/local/bin/vps-setup << EOF
 #!/bin/bash
 REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
-curl -fsSL "\$REPO_BASE/ubuntu/universal_vps_setup.py?$(date +%s)" -o /usr/local/bin/universal_vps_setup.py \
+curl -fsSL "\$REPO_BASE/ubuntu/universal_vps_setup.py?\$(date +%s)" -o /usr/local/bin/universal_vps_setup.py \
     && chmod +x /usr/local/bin/universal_vps_setup.py \
     || echo "  Warning: could not fetch latest script, running cached version"
 python3 /usr/local/bin/universal_vps_setup.py "\$@"
@@ -145,7 +145,7 @@ EOF
     cat > /usr/local/bin/vps-post-setup << EOF
 #!/bin/bash
 REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
-if curl -fsSL "\$REPO_BASE/ubuntu/post_lockdown_setup.py?$(date +%s)" -o /usr/local/bin/post_lockdown_setup.py; then
+if curl -fsSL "\$REPO_BASE/ubuntu/post_lockdown_setup.py?\$(date +%s)" -o /usr/local/bin/post_lockdown_setup.py; then
     chmod +x /usr/local/bin/post_lockdown_setup.py
     sed -i 's/^REPO_BRANCH_OVERRIDE = None.*\$/REPO_BRANCH_OVERRIDE = "${BRANCH}"/' /usr/local/bin/post_lockdown_setup.py
 else
