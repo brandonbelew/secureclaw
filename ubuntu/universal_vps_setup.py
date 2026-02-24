@@ -1238,9 +1238,14 @@ TAILSCALE TROUBLESHOOTING:
             self.run_command("systemctl daemon-reload")
             self.log("Removed legacy openclaw system service", "SUCCESS")
 
+        # Pre-install Node.js as root so the official installer doesn't need
+        # sudo internally (which fails without a TTY in a su subprocess).
+        self.log("Installing Node.js...")
+        self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
+        self.run_command("apt-get install -y nodejs")
+
         # Run the official OpenClaw installer as the target user.
-        # --no-onboard skips the interactive wizard; the installer handles
-        # Node.js detection, npm install, and gateway service registration.
+        # Node.js is already present so the installer skips the sudo step.
         self.log("Running official OpenClaw installer...")
         self.run_command(
             f"su - {install_user} -c "
