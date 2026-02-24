@@ -1276,7 +1276,7 @@ After=network.target
 [Service]
 Type=simple
 User={install_user}
-ExecStart={openclaw_bin}
+ExecStart={openclaw_bin} gateway
 Restart=on-failure
 RestartSec=5
 Environment=HOME=/home/{install_user}
