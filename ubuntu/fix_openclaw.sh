@@ -68,7 +68,17 @@ pkill -u "$TARGET_USER" -f openclaw-gateway 2>/dev/null || true
 sleep 1
 ok "Stale processes cleared"
 
-# ── Step 3: Re-install via official installer ─────────────────────────────────
+# ── Step 3: Ensure Node.js is present (installer needs it, can't sudo without TTY) ──
+info "Ensuring Node.js is installed..."
+if ! command -v node &>/dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    apt-get install -y nodejs
+    ok "Node.js installed"
+else
+    ok "Node.js already present ($(node --version))"
+fi
+
+# ── Step 4: Re-install via official installer ─────────────────────────────────
 info "Running official OpenClaw installer as ${TARGET_USER}..."
 echo
 su - "$TARGET_USER" -c \
@@ -76,7 +86,7 @@ su - "$TARGET_USER" -c \
 echo
 ok "OpenClaw installed"
 
-# ── Step 4: Enable linger ──────────────────────────────────────────────────────
+# ── Step 5: Enable linger ──────────────────────────────────────────────────────
 info "Enabling linger for ${TARGET_USER} (service starts at boot)..."
 loginctl enable-linger "$TARGET_USER"
 ok "Linger enabled"
