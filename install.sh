@@ -1,5 +1,6 @@
 #!/bin/bash
-# Ubuntu VPS Setup Installer
+# SecureClaw Setup Installer
+# Supports both VPS/remote-server installs and local Ubuntu desktop installs.
 
 set -e
 
@@ -33,11 +34,10 @@ print_banner() {
     echo -e "${BLUE}${BOLD}  ╚══════════════════════════════════════════════════════════════╝${RESET}"
     echo
     echo -e "  ${YELLOW}${BOLD}  ⚠  WARNING${RESET}"
-    echo -e "  ${YELLOW}  This script is intended for use on a fresh virtual private server only.${RESET}"
-    echo -e "  ${YELLOW}  It will modify firewall policies and system configuration in ways that${RESET}"
-    echo -e "  ${YELLOW}  may lock you out or require a full server reinstall if something goes${RESET}"
-    echo -e "  ${YELLOW}  wrong. By continuing, you accept all responsibility for any data loss${RESET}"
-    echo -e "  ${YELLOW}  or damages. Proceed only if you know what you are doing.${RESET}"
+    echo -e "  ${YELLOW}  This script modifies firewall policies and system configuration.${RESET}"
+    echo -e "  ${YELLOW}  Incorrect use on a system you depend on could lock you out or${RESET}"
+    echo -e "  ${YELLOW}  require a full reinstall. By continuing, you accept all responsibility${RESET}"
+    echo -e "  ${YELLOW}  for any data loss or damages. Proceed only if you know what you are doing.${RESET}"
     echo
 }
 
@@ -86,6 +86,59 @@ check_ubuntu() {
     fi
 }
 
+# ── Mode detection ────────────────────────────────────────────────────────────
+# Sets SETUP_MODE="vps" or "local".
+# Auto-detects via environment / filesystem, then confirms with the user.
+detect_mode() {
+    SETUP_MODE="vps"  # safe default
+
+    # SSH_CLIENT / SSH_CONNECTION may survive sudo depending on sudoers config
+    if [[ -n "${SSH_CLIENT:-}" || -n "${SSH_CONNECTION:-}" ]]; then
+        SETUP_MODE="vps"
+    elif [[ -n "${XRDP_SESSION:-}" ]]; then
+        # Already inside an xrdp session — treat as VPS continuation
+        SETUP_MODE="vps"
+    else
+        # Check for an active graphical session on the physical machine.
+        # /tmp/.X11-unix contains a socket per running X server.
+        # Wayland compositors create sockets under /run/user/<uid>/wayland-0.
+        # Both are readable as root without needing env vars stripped by sudo.
+        if [[ -d /tmp/.X11-unix ]] && [[ -n "$(ls /tmp/.X11-unix 2>/dev/null)" ]]; then
+            SETUP_MODE="local"
+        elif ls /run/user/*/wayland-0 2>/dev/null | head -1 | grep -q .; then
+            SETUP_MODE="local"
+        fi
+    fi
+
+    echo
+    print_divider
+    echo
+    echo -e "  ${CYAN}${BOLD}Select setup type:${RESET}"
+    echo
+    echo -e "  ${CYAN}  1.${RESET}  ${BOLD}VPS / remote server${RESET}"
+    echo -e "       ${DIM}SSH or cloud provider — fresh headless server${RESET}"
+    echo -e "  ${CYAN}  2.${RESET}  ${BOLD}Local Ubuntu desktop${RESET}"
+    echo -e "       ${DIM}Physically present at this machine — Ubuntu Desktop installed${RESET}"
+    echo
+
+    if [[ "$SETUP_MODE" == "local" ]]; then
+        DEFAULT_CHOICE="2"
+        echo -e "  ${GREEN}Auto-detected: local desktop${RESET}"
+    else
+        DEFAULT_CHOICE="1"
+        echo -e "  ${GREEN}Auto-detected: VPS / remote server${RESET}"
+    fi
+    echo
+
+    read -rp "  Enter choice [${DEFAULT_CHOICE}]: " mode_choice
+    mode_choice="${mode_choice:-$DEFAULT_CHOICE}"
+
+    case "$mode_choice" in
+        2) SETUP_MODE="local" ;;
+        *) SETUP_MODE="vps"   ;;
+    esac
+}
+
 # ── Steps ─────────────────────────────────────────────────────────────────────
 install_python() {
     print_step 2 4 "Installing Python and dependencies...    "
@@ -113,8 +166,10 @@ install_scripts() {
     if [[ -n "$SCRIPT_DIR" ]]; then
         cp "$SCRIPT_DIR/universal_vps_setup.py" /usr/local/bin/
         cp "$SCRIPT_DIR/post_lockdown_setup.py" /usr/local/bin/
+        cp "$SCRIPT_DIR/local_setup.py"         /usr/local/bin/
         chmod +x /usr/local/bin/universal_vps_setup.py
         chmod +x /usr/local/bin/post_lockdown_setup.py
+        chmod +x /usr/local/bin/local_setup.py
     else
         # Repo not available locally — download from GitHub
         REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
@@ -123,8 +178,10 @@ install_scripts() {
         fi
         curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py" -o /usr/local/bin/universal_vps_setup.py
         curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py" -o /usr/local/bin/post_lockdown_setup.py
+        curl -fsSL "$REPO_BASE/ubuntu/local_setup.py"         -o /usr/local/bin/local_setup.py
         chmod +x /usr/local/bin/universal_vps_setup.py
         chmod +x /usr/local/bin/post_lockdown_setup.py
+        chmod +x /usr/local/bin/local_setup.py
     fi
 
     print_ok
@@ -136,7 +193,7 @@ create_shortcuts() {
     cat > /usr/local/bin/vps-setup << EOF
 #!/bin/bash
 REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
-curl -fsSL "\$REPO_BASE/ubuntu/universal_vps_setup.py?$(date +%s)" -o /usr/local/bin/universal_vps_setup.py \
+curl -fsSL "\$REPO_BASE/ubuntu/universal_vps_setup.py?\$(date +%s)" -o /usr/local/bin/universal_vps_setup.py \
     && chmod +x /usr/local/bin/universal_vps_setup.py \
     || echo "  Warning: could not fetch latest script, running cached version"
 python3 /usr/local/bin/universal_vps_setup.py "\$@"
@@ -145,7 +202,7 @@ EOF
     cat > /usr/local/bin/vps-post-setup << EOF
 #!/bin/bash
 REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
-if curl -fsSL "\$REPO_BASE/ubuntu/post_lockdown_setup.py?$(date +%s)" -o /usr/local/bin/post_lockdown_setup.py; then
+if curl -fsSL "\$REPO_BASE/ubuntu/post_lockdown_setup.py?\$(date +%s)" -o /usr/local/bin/post_lockdown_setup.py; then
     chmod +x /usr/local/bin/post_lockdown_setup.py
     sed -i 's/^REPO_BRANCH_OVERRIDE = None.*\$/REPO_BRANCH_OVERRIDE = "${BRANCH}"/' /usr/local/bin/post_lockdown_setup.py
 else
@@ -154,12 +211,33 @@ fi
 python3 /usr/local/bin/post_lockdown_setup.py "\$@"
 EOF
 
+    cat > /usr/local/bin/local-setup << EOF
+#!/bin/bash
+REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
+if curl -fsSL "\$REPO_BASE/ubuntu/local_setup.py?\$(date +%s)" -o /usr/local/bin/local_setup.py; then
+    chmod +x /usr/local/bin/local_setup.py
+else
+    echo "  Warning: could not fetch latest script, running cached version"
+fi
+export SECURECLAW_BRANCH="${BRANCH}"
+python3 /usr/local/bin/local_setup.py "\$@"
+EOF
+
     chmod +x /usr/local/bin/vps-setup
     chmod +x /usr/local/bin/vps-post-setup
+    chmod +x /usr/local/bin/local-setup
     print_ok
 }
 
 show_complete() {
+    if [[ "$SETUP_MODE" == "local" ]]; then
+        show_complete_local
+    else
+        show_complete_vps
+    fi
+}
+
+show_complete_vps() {
     echo
     print_divider
     echo
@@ -187,12 +265,42 @@ show_complete() {
     echo
 }
 
+show_complete_local() {
+    echo
+    print_divider
+    echo
+    echo -e "  ${GREEN}${BOLD}  Installation complete!${RESET}"
+    echo
+    echo -e "  This installer will set up your local machine with:"
+    echo -e "  ${GREEN}  ✓${RESET}  xrdp — remote desktop access via Tailscale"
+    echo -e "  ${GREEN}  ✓${RESET}  Tailscale VPN — reach this machine from anywhere"
+    echo -e "  ${GREEN}  ✓${RESET}  Tailscale-only firewall rules (SSH + RDP)"
+    echo -e "  ${GREEN}  ✓${RESET}  OpenClaw AI assistant — running as a background service"
+    echo -e "  ${GREEN}  ✓${RESET}  Google Chrome browser"
+    echo
+    print_divider
+    echo
+    echo -e "  ${BOLD}What happens next:${RESET}"
+    echo
+    echo -e "  ${CYAN}  1.${RESET}  The setup wizard will guide you step by step"
+    echo -e "  ${CYAN}  2.${RESET}  You will select or create the install user"
+    echo -e "  ${CYAN}  3.${RESET}  You will be asked to authenticate Tailscale"
+    echo -e "       ${DIM}(a link will appear — open it in your browser)${RESET}"
+    echo -e "  ${CYAN}  4.${RESET}  Everything installs in a single pass — no reconnect needed"
+    echo -e "  ${CYAN}  5.${RESET}  Run ${YELLOW}sudo local-setup${RESET} any time to re-run or resume"
+    echo
+    print_divider
+    echo
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
     print_banner
 
     check_root
     check_ubuntu
+
+    detect_mode
 
     print_divider
     echo
@@ -224,7 +332,11 @@ main() {
 
     echo -e "  ${GREEN}${BOLD}Starting setup wizard...${RESET}"
     echo
-    exec /usr/local/bin/vps-setup
+    if [[ "$SETUP_MODE" == "local" ]]; then
+        exec /usr/local/bin/local-setup
+    else
+        exec /usr/local/bin/vps-setup
+    fi
 }
 
 main
