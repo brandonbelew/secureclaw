@@ -166,10 +166,12 @@ install_scripts() {
     if [[ -n "$SCRIPT_DIR" ]]; then
         cp "$SCRIPT_DIR/universal_vps_setup.py" /usr/local/bin/
         cp "$SCRIPT_DIR/post_lockdown_setup.py" /usr/local/bin/
-        cp "$SCRIPT_DIR/local_setup.py"         /usr/local/bin/
         chmod +x /usr/local/bin/universal_vps_setup.py
         chmod +x /usr/local/bin/post_lockdown_setup.py
-        chmod +x /usr/local/bin/local_setup.py
+        if [[ "$SETUP_MODE" == "local" ]]; then
+            cp "$SCRIPT_DIR/local_setup.py" /usr/local/bin/
+            chmod +x /usr/local/bin/local_setup.py
+        fi
     else
         # Repo not available locally — download from GitHub
         REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
@@ -178,10 +180,12 @@ install_scripts() {
         fi
         curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py" -o /usr/local/bin/universal_vps_setup.py
         curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py" -o /usr/local/bin/post_lockdown_setup.py
-        curl -fsSL "$REPO_BASE/ubuntu/local_setup.py"         -o /usr/local/bin/local_setup.py
         chmod +x /usr/local/bin/universal_vps_setup.py
         chmod +x /usr/local/bin/post_lockdown_setup.py
-        chmod +x /usr/local/bin/local_setup.py
+        if [[ "$SETUP_MODE" == "local" ]]; then
+            curl -fsSL "$REPO_BASE/ubuntu/local_setup.py" -o /usr/local/bin/local_setup.py
+            chmod +x /usr/local/bin/local_setup.py
+        fi
     fi
 
     print_ok
