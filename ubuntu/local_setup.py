@@ -294,26 +294,11 @@ polkit.addRule(function(action, subject) {
         self.log("xrdp startwm.sh configured for GNOME", "SUCCESS")
 
     def _configure_xrdp_for_xfce(self):
-        """Configure xrdp startwm.sh for XFCE and disable sleep/screensaver."""
-        # 1. startwm.sh — launch XFCE with proper D-Bus / XDG env
-        startwm_path = Path("/etc/xrdp/startwm.sh")
-        if startwm_path.exists():
-            backup = Path("/etc/xrdp/startwm.sh.pre-local-setup")
-            if not backup.exists():
-                backup.write_text(startwm_path.read_text())
-                self.log("Backed up original startwm.sh", "SUCCESS")
+        """Disable sleep/screensaver for XFCE xrdp sessions."""
+        # Do NOT touch startwm.sh — the default xrdp behaviour of reading
+        # ~/.xsession works correctly and matches what the VPS setup does.
 
-        startwm_path.write_text(
-            "#!/bin/sh\n"
-            "unset DBUS_SESSION_BUS_ADDRESS\n"
-            "unset XDG_RUNTIME_DIR\n"
-            "export XDG_CONFIG_DIRS=${XDG_CONFIG_DIRS:-/etc/xdg}:/etc\n"
-            "exec startxfce4\n"
-        )
-        startwm_path.chmod(0o755)
-        self.log("Configured startwm.sh for XFCE", "SUCCESS")
-
-        # 2. Disable sleep/screensaver so xrdp sessions don't blank
+        # Disable sleep/screensaver so xrdp sessions don't blank
         xfconf_dir = Path("/etc/xdg/xfce4/xfconf/xfce-perchannel-xml")
         xfconf_dir.mkdir(parents=True, exist_ok=True)
 
@@ -459,13 +444,7 @@ polkit.addRule(function(action, subject) {
                 "exec gnome-session\n"
             )
         else:
-            content = (
-                "#!/bin/bash\n"
-                "unset DBUS_SESSION_BUS_ADDRESS\n"
-                "unset XDG_RUNTIME_DIR\n"
-                "export XDG_CONFIG_DIRS=${XDG_CONFIG_DIRS:-/etc/xdg}:/etc\n"
-                "exec startxfce4\n"
-            )
+            content = "#!/bin/bash\nexec xfce4-session\n"
 
         xsession_path.write_text(content)
         self.run_command(f"chown {username}:{username} {xsession_path}")
