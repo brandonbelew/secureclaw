@@ -1245,6 +1245,16 @@ Categories=System;Security;
             print(f"{Colors.FAIL}This script must be run as root (use sudo){Colors.ENDC}")
             sys.exit(1)
 
+        # Suppress interactive apt/debconf prompts (e.g. display-manager selection)
+        os.environ.setdefault("DEBIAN_FRONTEND", "noninteractive")
+
+        # Ensure stdin is connected to the terminal even when the installer was
+        # piped in (e.g. curl … | sudo bash), which would leave stdin at EOF.
+        try:
+            sys.stdin = open("/dev/tty", "r")
+        except OSError:
+            pass  # Non-TTY environments (containers, CI) — proceed without
+
         # Show resume state from a previous run
         state = self._load_state()
         completed = [
