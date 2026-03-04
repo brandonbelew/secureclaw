@@ -130,7 +130,7 @@ detect_mode() {
     fi
     echo
 
-    read -rp "  Enter choice [${DEFAULT_CHOICE}]: " mode_choice
+    read -rp "  Enter choice [${DEFAULT_CHOICE}]: " mode_choice </dev/tty
     mode_choice="${mode_choice:-$DEFAULT_CHOICE}"
 
     case "$mode_choice" in
@@ -310,7 +310,7 @@ main() {
     echo
     echo -e "  Type ${YELLOW}${BOLD}INSTALL${RESET} to accept and continue, or anything else to cancel."
     echo
-    read -rp "  > " confirm
+    read -rp "  > " confirm </dev/tty
     echo
     if [[ "$confirm" != "INSTALL" ]]; then
         echo -e "  ${YELLOW}Cancelled.${RESET} No changes were made to your server."
