@@ -130,7 +130,7 @@ detect_mode() {
     fi
     echo
 
-    read -rp "  Enter choice [${DEFAULT_CHOICE}]: " mode_choice </dev/tty
+    read -rp "  Enter choice [${DEFAULT_CHOICE}]: " mode_choice
     mode_choice="${mode_choice:-$DEFAULT_CHOICE}"
 
     case "$mode_choice" in
@@ -304,13 +304,20 @@ main() {
     check_root
     check_ubuntu
 
+    # If stdin is not a terminal (e.g. curl | bash), reconnect to the
+    # controlling terminal so interactive read prompts work. Falls back
+    # silently if /dev/tty is unavailable (containers, CI, etc.).
+    if [[ ! -t 0 ]]; then
+        exec < /dev/tty 2>/dev/null || true
+    fi
+
     detect_mode
 
     print_divider
     echo
     echo -e "  Type ${YELLOW}${BOLD}INSTALL${RESET} to accept and continue, or anything else to cancel."
     echo
-    read -rp "  > " confirm </dev/tty
+    read -rp "  > " confirm
     echo
     if [[ "$confirm" != "INSTALL" ]]; then
         echo -e "  ${YELLOW}Cancelled.${RESET} No changes were made to your server."
