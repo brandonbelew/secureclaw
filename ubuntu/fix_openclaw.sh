@@ -72,7 +72,7 @@ ok "Stale processes cleared"
 info "Ensuring Node.js is installed..."
 if ! command -v node &>/dev/null; then
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt-get install -y nodejs
+    apt-get install -y nodejs build-essential cmake make g++ python3
     ok "Node.js installed"
 else
     ok "Node.js already present ($(node --version))"

@@ -631,7 +631,7 @@ only affects incoming network connections.{Colors.ENDC}
         # sudo internally (fails without a TTY in a su subprocess)
         self.log("Installing Node.js...")
         self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
-        self.run_command("apt-get install -y nodejs")
+        self.run_command("apt-get install -y nodejs build-essential cmake make g++ python3")
 
         self.log("Running official OpenClaw installer...")
         self.run_command(
