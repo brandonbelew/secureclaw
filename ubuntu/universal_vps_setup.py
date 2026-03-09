@@ -1242,7 +1242,7 @@ TAILSCALE TROUBLESHOOTING:
         # sudo internally (which fails without a TTY in a su subprocess).
         self.log("Installing Node.js...")
         self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
-        self.run_command("apt-get install -y nodejs")
+        self.run_command("apt-get install -y nodejs build-essential cmake make g++ python3")
 
         # Run the official OpenClaw installer as the target user.
         # Node.js is already present so the installer skips the sudo step.
