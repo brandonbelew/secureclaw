@@ -629,7 +629,9 @@ only affects incoming network connections.{Colors.ENDC}
 
         # Pre-install Node.js as root so the official installer doesn't need
         # sudo internally (fails without a TTY in a su subprocess)
-        self.log("Installing Node.js...")
+        self.log("Installing Node.js and build tools...")
+        print(f"\n  {Colors.WARNING}{Colors.BOLD}⚠  Note:{Colors.ENDC}{Colors.WARNING} This step can take 2–3 minutes and may appear to hang.{Colors.ENDC}")
+        print(f"  {Colors.WARNING}   If progress stops, press Enter a few times to continue.{Colors.ENDC}\n")
         self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
         self.run_command("apt-get install -y nodejs build-essential cmake make g++ python3")
 
