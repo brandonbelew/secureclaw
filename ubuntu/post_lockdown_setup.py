@@ -234,6 +234,47 @@ Current hostname: {Colors.BOLD}{current}{Colors.ENDC}
         self.run_command(f"loginctl enable-linger {install_user}")
         self.log("OpenClaw installed and gateway service registered", "SUCCESS")
 
+    def install_homebrew(self):
+        """Pre-install Homebrew so OpenClaw skills install correctly during onboarding"""
+        print(f"\n{Colors.HEADER}=== HOMEBREW INSTALLATION ==={Colors.ENDC}")
+        install_user = self.get_install_user()
+        if not install_user:
+            self.log("No install user set — skipping Homebrew", "WARNING")
+            return
+
+        # Check if already present for this user
+        result = self.run_command(
+            f"su - {install_user} -c 'command -v brew'", check=False
+        )
+        if result.returncode == 0:
+            self.log("Homebrew already present — skipping", "SUCCESS")
+            return
+
+        self.log("Installing Homebrew (required for OpenClaw skills)...")
+        # Extra deps Homebrew needs on Linux beyond what we already installed
+        self.run_command("apt-get install -y -qq file procps")
+
+        # Download installer as root, run it as the target user
+        self.run_command(
+            "curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh "
+            "-o /tmp/brew_install.sh"
+        )
+        self.run_command(
+            f"su - {install_user} -c 'NONINTERACTIVE=1 bash /tmp/brew_install.sh'",
+            capture_output=False
+        )
+        self.run_command("rm -f /tmp/brew_install.sh", check=False)
+
+        # Add brew to the user's shell profile so it's on PATH after login
+        brew_env = 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"'
+        for rc in [f"/home/{install_user}/.bashrc", f"/home/{install_user}/.profile"]:
+            self.run_command(
+                f"grep -qF 'linuxbrew' {rc} || echo '{brew_env}' >> {rc}",
+                check=False
+            )
+
+        self.log("Homebrew installed", "SUCCESS")
+
     def install_chrome(self):
         """Install Google Chrome"""
         print(f"\n{Colors.HEADER}=== GOOGLE CHROME INSTALLATION ==={Colors.ENDC}")
@@ -915,6 +956,7 @@ not a substitute for good security practices:
             self.configure_hostname()
             self.test_lockdown_status()
             self.install_openclaw()
+            self.install_homebrew()
             self.install_chrome()
             self.install_chrome_cleanup()
             self.install_security_check()
