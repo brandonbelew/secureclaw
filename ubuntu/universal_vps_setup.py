@@ -1284,6 +1284,11 @@ TAILSCALE TROUBLESHOOTING:
         # Extra deps Homebrew needs on Linux beyond what we already installed
         self.run_command("apt-get install -y -qq file procps")
 
+        # Pre-create the Homebrew prefix as root and give the user ownership
+        # so the installer doesn't need sudo to create /home/linuxbrew
+        self.run_command("mkdir -p /home/linuxbrew/.linuxbrew")
+        self.run_command(f"chown -R {install_user}:{install_user} /home/linuxbrew")
+
         # Download installer as root, run it as the target user
         self.run_command(
             "curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh "
