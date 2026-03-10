@@ -9,11 +9,26 @@ import os
 import sys
 import subprocess
 import time
+import pwd
 from pathlib import Path
 
 # Injected at install time by vps-post-setup shortcut via sed.
 # When None, _get_repo_branch() falls back to git detection.
 REPO_BRANCH_OVERRIDE = None  # injected at install time
+
+def _real_user_homes():
+    """Yield Path objects for /home subdirs owned by real system users (uid >= 1000).
+    Excludes dirs like /home/linuxbrew that are not actual user accounts."""
+    for d in Path("/home").iterdir():
+        if not d.is_dir():
+            continue
+        try:
+            entry = pwd.getpwnam(d.name)
+            if entry.pw_uid >= 1000:
+                yield d
+        except KeyError:
+            continue
+
 
 class Colors:
     HEADER = '\033[95m'
@@ -176,10 +191,7 @@ Current hostname: {Colors.BOLD}{current}{Colors.ENDC}
 
     def get_install_user(self):
         """Find the primary non-root user to install OpenClaw for"""
-        users = [
-            d.name for d in Path("/home").iterdir()
-            if d.is_dir() and d.stat().st_uid >= 1000
-        ]
+        users = [d.name for d in _real_user_homes()]
         if len(users) == 1:
             return users[0]
         elif len(users) > 1:
@@ -582,11 +594,7 @@ Icon=security-high
 Terminal=false
 Categories=System;Security;
 """
-        user_dirs = [
-            d for d in Path("/home").iterdir()
-            if d.is_dir() and d.stat().st_uid >= 1000
-        ]
-        for user_dir in user_dirs:
+        for user_dir in _real_user_homes():
             username = user_dir.name
             desktop_dir = user_dir / "Desktop"
             desktop_dir.mkdir(exist_ok=True)
@@ -736,16 +744,7 @@ WantedBy=timers.target
         self.log("Application menu entry written", "SUCCESS")
 
         # Per-user autostart entries
-        for user_dir in Path("/home").iterdir():
-            if not user_dir.is_dir():
-                continue
-            try:
-                uid = user_dir.stat().st_uid
-            except Exception:
-                continue
-            if uid < 1000:
-                continue
-
+        for user_dir in _real_user_homes():
             username = user_dir.name
             autostart_dir = user_dir / ".config" / "autostart"
             autostart_dir.mkdir(parents=True, exist_ok=True)
@@ -773,10 +772,7 @@ WantedBy=timers.target
         print(f"\n{Colors.HEADER}=== CREATING USER SHORTCUTS ==={Colors.ENDC}")
         
         # Find regular user directories (excluding system users)
-        user_dirs = []
-        for user_dir in Path("/home").iterdir():
-            if user_dir.is_dir() and user_dir.stat().st_uid >= 1000:
-                user_dirs.append(user_dir)
+        user_dirs = list(_real_user_homes())
         
         # URL shortcuts to create on every user's desktop
         url_shortcuts = [
