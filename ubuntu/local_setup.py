@@ -14,6 +14,7 @@ import os
 import sys
 import subprocess
 import time
+import pwd
 import json
 import re
 import secrets
@@ -22,6 +23,20 @@ import getpass
 from pathlib import Path
 
 STATE_FILE = "/var/lib/local-setup/state.json"
+
+
+def _real_user_homes():
+    """Yield Path objects for /home subdirs owned by real system users (uid >= 1000).
+    Excludes dirs like /home/linuxbrew that are not actual user accounts."""
+    for d in Path("/home").iterdir():
+        if not d.is_dir():
+            continue
+        try:
+            entry = pwd.getpwnam(d.name)
+            if entry.pw_uid >= 1000:
+                yield d
+        except KeyError:
+            continue
 
 
 class Colors:
@@ -337,10 +352,7 @@ polkit.addRule(function(action, subject) {
 
         print(f"\n{Colors.HEADER}=== SELECT INSTALL USER ==={Colors.ENDC}")
 
-        existing = sorted(
-            d.name for d in Path("/home").iterdir()
-            if d.is_dir() and d.stat().st_uid >= 1000
-        )
+        existing = sorted(d.name for d in _real_user_homes())
 
         if len(existing) == 1:
             user = existing[0]
@@ -1027,9 +1039,7 @@ Icon=security-high
 Terminal=false
 Categories=System;Security;
 """
-        for user_dir in Path("/home").iterdir():
-            if not user_dir.is_dir() or user_dir.stat().st_uid < 1000:
-                continue
+        for user_dir in _real_user_homes():
             username = user_dir.name
             desktop_dir = user_dir / "Desktop"
             desktop_dir.mkdir(exist_ok=True)
@@ -1108,15 +1118,7 @@ Categories=System;Security;
         )
         (app_dir / "openclaw-widget.desktop").write_text(desktop_content)
 
-        for user_dir in Path("/home").iterdir():
-            if not user_dir.is_dir():
-                continue
-            try:
-                uid = user_dir.stat().st_uid
-            except Exception:
-                continue
-            if uid < 1000:
-                continue
+        for user_dir in _real_user_homes():
             username = user_dir.name
 
             autostart_dir = user_dir / ".config" / "autostart"
@@ -1157,9 +1159,7 @@ Categories=System;Security;
             },
         ]
 
-        for user_dir in Path("/home").iterdir():
-            if not user_dir.is_dir() or user_dir.stat().st_uid < 1000:
-                continue
+        for user_dir in _real_user_homes():
             username = user_dir.name
             desktop_dir = user_dir / "Desktop"
             desktop_dir.mkdir(exist_ok=True)

@@ -10,6 +10,7 @@ import os
 import sys
 import subprocess
 import time
+import pwd
 import json
 from pathlib import Path
 import getpass
@@ -21,6 +22,20 @@ import string
 import re
 
 STATE_FILE = "/var/lib/vps-setup/state.json"
+
+def _real_user_homes():
+    """Yield Path objects for /home subdirs owned by real system users (uid >= 1000).
+    Excludes dirs like /home/linuxbrew that are not actual user accounts."""
+    for d in Path("/home").iterdir():
+        if not d.is_dir():
+            continue
+        try:
+            entry = pwd.getpwnam(d.name)
+            if entry.pw_uid >= 1000:
+                yield d
+        except KeyError:
+            continue
+
 
 class Colors:
     """Terminal colors for better UX"""
@@ -1608,11 +1623,7 @@ Icon=security-high
 Terminal=false
 Categories=System;Security;
 """
-        user_dirs = [
-            d for d in Path("/home").iterdir()
-            if d.is_dir() and d.stat().st_uid >= 1000
-        ]
-        for user_dir in user_dirs:
+        for user_dir in _real_user_homes():
             username = user_dir.name
             desktop_dir = user_dir / "Desktop"
             desktop_dir.mkdir(exist_ok=True)
@@ -1701,10 +1712,7 @@ WantedBy=timers.target
 
         print(f"\n{Colors.HEADER}=== CREATING USER SHORTCUTS ==={Colors.ENDC}")
 
-        user_dirs = [
-            d for d in Path("/home").iterdir()
-            if d.is_dir() and d.stat().st_uid >= 1000
-        ]
+        user_dirs = list(_real_user_homes())
 
         url_shortcuts = [
             {
