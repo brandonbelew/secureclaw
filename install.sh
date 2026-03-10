@@ -29,7 +29,7 @@ print_banner() {
     echo -e "${BLUE}${BOLD}  ║                                                              ║${RESET}"
     echo -e "${BLUE}${BOLD}  ║           🦞  SecureClaw Setup Installer                     ║${RESET}"
     echo -e "${BLUE}${BOLD}  ║           Secure Remote Desktop Environment                 ║${RESET}"
-    echo -e "${BLUE}${BOLD}  ║                                By: Brandon Belew            ║${RESET}"
+    echo -e "${BLUE}${BOLD}  ║                          By: Belew Consulting LLC           ║${RESET}"
     echo -e "${BLUE}${BOLD}  ║                                                              ║${RESET}"
     echo -e "${BLUE}${BOLD}  ╚══════════════════════════════════════════════════════════════╝${RESET}"
     echo
