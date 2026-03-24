@@ -1722,9 +1722,9 @@ WantedBy=timers.target
                 "icon": "text-html",
             },
             {
-                "filename": "OC-Chrome-Extension.desktop",
-                "name": "OC Chrome Extension",
-                "url": "https://docs.openclaw.ai/tools/chrome-extension#chrome-extension",
+                "filename": "OC-Browser.desktop",
+                "name": "OC Browser",
+                "url": "https://docs.openclaw.ai/tools/browser",
                 "icon": "text-html",
             },
         ]

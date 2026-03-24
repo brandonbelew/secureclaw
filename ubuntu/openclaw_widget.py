@@ -481,10 +481,10 @@ class OpenClawWidget(Gtk.Window):
         self.dash_sublabel = dash_row[1]
         wrapper.pack_start(dash_row[0], False, False, 0)
 
-        # Install Plugin
+        # Start Browser
         plugin_row = self._make_action_row(
-            "Install / Reinstall Plugin",
-            "Installs the OpenClaw browser extension",
+            "Start Browser",
+            "Start the OpenClaw managed browser",
             self._on_install_plugin,
             icon_pixbuf=self.logo_pixbuf_24
         )
@@ -798,78 +798,40 @@ class OpenClawWidget(Gtk.Window):
 
     def _on_install_plugin(self, button):
         button.set_sensitive(False)
-        self.plugin_sublabel.set_text("Installing...")
+        self.plugin_sublabel.set_text("Starting...")
 
-        def do_install():
-            _, _, rc = run_command("openclaw browser extension install", timeout=60)
-            stdout, _, _ = run_command("openclaw browser extension path", timeout=10)
-            ext_path = stdout.strip()
-            GLib.idle_add(self._show_plugin_dialog, ext_path, rc)
+        def do_start():
+            _, _, rc = run_command("openclaw browser start", timeout=30)
+            GLib.idle_add(self._show_browser_dialog, button, rc)
 
-        threading.Thread(target=do_install, daemon=True).start()
+        threading.Thread(target=do_start, daemon=True).start()
 
-    def _show_plugin_dialog(self, ext_path, rc):
-        self.plugin_sublabel.set_text("Installs the OpenClaw browser extension")
+    def _show_browser_dialog(self, button, rc):
+        self.plugin_sublabel.set_text("Start the OpenClaw managed browser")
+        button.set_sensitive(True)
 
         dialog = Gtk.Dialog(
-            title="Install Browser Extension",
+            title="Start Browser",
             transient_for=self,
             modal=True
         )
-        dialog.set_default_size(380, -1)
+        dialog.set_default_size(320, -1)
         dialog.get_content_area().set_spacing(8)
         dialog.get_content_area().set_margin_start(12)
         dialog.get_content_area().set_margin_end(12)
         dialog.get_content_area().set_margin_top(12)
         dialog.get_content_area().set_margin_bottom(12)
 
-        if rc == 0 and ext_path:
-            status_lbl = Gtk.Label(label="Extension files prepared. Load it in Chrome:")
-        else:
-            status_lbl = Gtk.Label(
-                label="Extension prepared (or already installed). Load it in Chrome:"
-            )
-        status_lbl.set_line_wrap(True)
-        status_lbl.set_halign(Gtk.Align.START)
-        dialog.get_content_area().pack_start(status_lbl, False, False, 0)
-
-        if ext_path:
-            path_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            path_entry = Gtk.Entry()
-            path_entry.set_text(ext_path)
-            path_entry.set_editable(False)
-            path_entry.set_hexpand(True)
-            path_row.pack_start(path_entry, True, True, 0)
-
-            copy_btn = Gtk.Button(label="Copy")
-            copy_btn.connect(
-                "clicked",
-                lambda b: Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(ext_path, -1)
-            )
-            path_row.pack_start(copy_btn, False, False, 0)
-            dialog.get_content_area().pack_start(path_row, False, False, 0)
-
-        steps_text = (
-            "1. Open Chrome\n"
-            "2. Go to chrome://extensions\n"
-            "3. Enable Developer Mode (top-right toggle)\n"
-            "4. Click 'Load unpacked'\n"
-            "5. Select the path shown above"
-        )
-        steps_lbl = Gtk.Label(label=steps_text)
-        steps_lbl.set_halign(Gtk.Align.START)
-        steps_lbl.set_line_wrap(True)
-        dialog.get_content_area().pack_start(steps_lbl, False, False, 0)
+        msg = "Browser started." if rc == 0 else "Browser start returned an error. Check openclaw status."
+        lbl = Gtk.Label(label=msg)
+        lbl.set_line_wrap(True)
+        lbl.set_halign(Gtk.Align.START)
+        dialog.get_content_area().pack_start(lbl, False, False, 0)
 
         dialog.add_button("Close", Gtk.ResponseType.CLOSE)
         dialog.show_all()
         dialog.run()
         dialog.destroy()
-
-        # Re-enable button
-        for child in self.get_children():
-            pass  # walk would be complex; simpler:
-        self.plugin_sublabel.set_text("Installs the OpenClaw browser extension")
 
         return False
 
