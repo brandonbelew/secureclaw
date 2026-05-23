@@ -1228,7 +1228,6 @@ TAILSCALE TROUBLESHOOTING:
             self.show_gui_progress("Installing Applications", "Installing OpenClaw and Google Chrome...")
 
         self.install_openclaw()
-        self.install_openclaw_plugins()
         self.install_homebrew()
         self.install_chrome()
         self.install_chrome_cleanup()
@@ -1277,32 +1276,6 @@ TAILSCALE TROUBLESHOOTING:
         self.run_command(f"loginctl enable-linger {install_user}")
         self.log("OpenClaw installed and gateway service registered", "SUCCESS")
         self._save_state(openclaw_installed=True)
-
-    def install_openclaw_plugins(self):
-        """Install OpenClaw plugins via the openclaw plugin manager"""
-        if self._step_done("openclaw_plugins_installed"):
-            self.log("OpenClaw plugins already installed — skipping", "SUCCESS")
-            return
-
-        install_user = self.rdp_username or "root"
-
-        plugins = [
-            ("viberight-oc", "git+https://github.com/Belew-Consulting-LLC/viberight-oc.git"),
-        ]
-
-        for plugin_id, plugin_ref in plugins:
-            self.log(f"Installing OpenClaw plugin: {plugin_id}...")
-            result = self.run_command(
-                f"su - {install_user} -c 'openclaw plugins install {plugin_ref}'",
-                check=False,
-                capture_output=True,
-            )
-            if result.returncode == 0:
-                self.log(f"Plugin '{plugin_id}' installed", "SUCCESS")
-            else:
-                self.log(f"Plugin '{plugin_id}' install failed (non-fatal) — install manually with: openclaw plugins install {plugin_ref}", "WARNING")
-
-        self._save_state(openclaw_plugins_installed=True)
 
     def install_homebrew(self):
         """Pre-install Homebrew so OpenClaw skills install correctly during onboarding"""

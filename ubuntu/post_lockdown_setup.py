@@ -246,30 +246,6 @@ Current hostname: {Colors.BOLD}{current}{Colors.ENDC}
         self.run_command(f"loginctl enable-linger {install_user}")
         self.log("OpenClaw installed and gateway service registered", "SUCCESS")
 
-    def install_openclaw_plugins(self):
-        """Install OpenClaw plugins via the openclaw plugin manager"""
-        print(f"\n{Colors.HEADER}=== OPENCLAW PLUGINS ==={Colors.ENDC}")
-        install_user = self.get_install_user()
-        if not install_user:
-            self.log("No install user — skipping plugin installation", "WARNING")
-            return
-
-        plugins = [
-            ("viberight-oc", "git+https://github.com/Belew-Consulting-LLC/viberight-oc.git"),
-        ]
-
-        for plugin_id, plugin_ref in plugins:
-            self.log(f"Installing OpenClaw plugin: {plugin_id}...")
-            result = self.run_command(
-                f"su - {install_user} -c 'openclaw plugins install {plugin_ref}'",
-                check=False,
-                capture_output=True,
-            )
-            if result.returncode == 0:
-                self.log(f"Plugin '{plugin_id}' installed", "SUCCESS")
-            else:
-                self.log(f"Plugin '{plugin_id}' install failed (non-fatal) — install manually with: openclaw plugins install {plugin_ref}", "WARNING")
-
     def install_homebrew(self):
         """Pre-install Homebrew so OpenClaw skills install correctly during onboarding"""
         print(f"\n{Colors.HEADER}=== HOMEBREW INSTALLATION ==={Colors.ENDC}")
@@ -981,7 +957,6 @@ not a substitute for good security practices:
             self.configure_hostname()
             self.test_lockdown_status()
             self.install_openclaw()
-            self.install_openclaw_plugins()
             self.install_homebrew()
             self.install_chrome()
             self.install_chrome_cleanup()
