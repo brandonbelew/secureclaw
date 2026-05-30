@@ -154,15 +154,6 @@ class LocalUbuntuSetup:
             pass
         return info
 
-    def get_os_codename(self):
-        try:
-            r = subprocess.run(
-                "lsb_release -cs", shell=True, capture_output=True, text=True, check=True
-            )
-            return r.stdout.strip()
-        except Exception:
-            return "noble"  # 24.04 fallback
-
     def find_service(self, *candidates):
         for name in candidates:
             r = subprocess.run(

@@ -160,14 +160,6 @@ class UniversalVPSSetup:
         except:
             return False
 
-    def get_os_codename(self):
-        """Get the Ubuntu OS codename for repository setup"""
-        try:
-            result = subprocess.run("lsb_release -cs", shell=True, capture_output=True, text=True, check=True)
-            return result.stdout.strip()
-        except Exception:
-            return "jammy"  # fallback to 22.04
-
     def detect_access_method(self):
         """Detect how the user is accessing the system"""
         # Check current environment first
