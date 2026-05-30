@@ -21,6 +21,7 @@ import secrets
 import string
 import getpass
 from pathlib import Path
+from platform_support import Platform
 
 STATE_FILE = "/var/lib/local-setup/state.json"
 
@@ -58,6 +59,9 @@ class LocalUbuntuSetup:
         self.desktop_type = None   # 'gnome', 'xfce'  — set during setup
         self.install_user = None   # set during select_install_user
         self.tailscale_ip = None   # set during configure_tailscale
+        self.os_info      = self._detect_os_info()
+        # Distro abstraction (package manager, firewall, repos, group names)
+        self.plat         = Platform(self.run_command, self.os_info)
 
         # Restore any persisted state from a previous (interrupted) run
         state = self._load_state()
@@ -136,6 +140,20 @@ class LocalUbuntuSetup:
 
     # ── OS helpers ────────────────────────────────────────────────────────────
 
+    def _detect_os_info(self):
+        """Read /etc/os-release and return a dict of OS metadata"""
+        info = {}
+        try:
+            with open("/etc/os-release") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line:
+                        k, _, v = line.partition("=")
+                        info[k] = v.strip('"')
+        except Exception:
+            pass
+        return info
+
     def get_os_codename(self):
         try:
             r = subprocess.run(
@@ -167,13 +185,12 @@ class LocalUbuntuSetup:
             return
 
         print(f"\n{Colors.HEADER}=== SYSTEM UPDATE ==={Colors.ENDC}")
-        self.run_command("apt-get update", capture_output=False)
-        self.run_command("apt-get upgrade -y", capture_output=False)
+        self.plat.pkg_refresh()
+        self.plat.pkg_upgrade()
         # Include openssh-server — not installed by default on Ubuntu Desktop
-        self.run_command(
-            "apt-get install -y curl wget gnupg2 software-properties-common "
-            "python3-tk openssh-server",
-            capture_output=False
+        self.plat.pkg_install(
+            "curl", "wget", "gnupg", "apt_extras", "tk", "openssh_server",
+            logical=True,
         )
         self.log("System update completed", "SUCCESS")
         self._save_state(system_updated=True)
@@ -186,21 +203,16 @@ class LocalUbuntuSetup:
 
         print(f"\n{Colors.HEADER}=== DESKTOP DETECTION ==={Colors.ENDC}")
 
-        # GNOME
-        r = self.run_command(
-            "dpkg -l gnome-shell 2>/dev/null | grep '^ii' || "
-            "dpkg -l gdm3 2>/dev/null | grep '^ii'",
-            check=False
-        )
-        if r.returncode == 0:
+        # GNOME (gdm3 on Debian, gdm on RHEL)
+        if self.plat.pkg_installed("gnome-shell") or \
+                self.plat.pkg_installed("gdm3") or self.plat.pkg_installed("gdm"):
             self.desktop_type = "gnome"
             self.log("Detected: GNOME desktop", "SUCCESS")
             self._save_state(desktop_detected=True, desktop_type="gnome")
             return
 
         # XFCE
-        r = self.run_command("dpkg -l xfce4-session 2>/dev/null | grep '^ii'", check=False)
-        if r.returncode == 0:
+        if self.plat.pkg_installed("xfce4-session"):
             self.desktop_type = "xfce"
             self.log("Detected: XFCE desktop", "SUCCESS")
             self._save_state(desktop_detected=True, desktop_type="xfce")
@@ -208,9 +220,8 @@ class LocalUbuntuSetup:
 
         # Nothing found — install XFCE
         self.log("No desktop environment found — installing XFCE + LightDM", "WARNING")
-        self.run_command(
-            "apt-get install -y xfce4 xfce4-goodies lightdm", capture_output=False
-        )
+        self.plat.ensure_extra_repos()
+        self.plat.pkg_install("xfce", "lightdm", logical=True)
         Path("/etc/lightdm").mkdir(parents=True, exist_ok=True)
         with open("/etc/lightdm/lightdm.conf", "w") as f:
             f.write("[Seat:*]\nWaylandEnable=false\nuser-session=xfce\n")
@@ -227,10 +238,10 @@ class LocalUbuntuSetup:
 
         print(f"\n{Colors.HEADER}=== XRDP SETUP ==={Colors.ENDC}")
 
-        r = self.run_command("dpkg -l xrdp 2>/dev/null | grep '^ii'", check=False)
-        if r.returncode != 0:
+        if not self.plat.pkg_installed("xrdp"):
             self.log("Installing xrdp...")
-            self.run_command("apt-get install -y xrdp", capture_output=False)
+            self.plat.ensure_extra_repos()
+            self.plat.pkg_install("xrdp")
 
         # Needed to avoid TLS certificate errors in xrdp sessions
         self.run_command("adduser xrdp ssl-cert", check=False)
@@ -252,8 +263,10 @@ class LocalUbuntuSetup:
           2. Write a polkit rule so the colour-manager auth popup never appears
           3. Configure startwm.sh to launch gnome-session
         """
-        # 1. Disable Wayland in GDM3
-        gdm3_conf = Path("/etc/gdm3/custom.conf")
+        # 1. Disable Wayland in GDM — path differs by distro:
+        #    Debian/Ubuntu: /etc/gdm3/custom.conf   RHEL/Fedora: /etc/gdm/custom.conf
+        gdm3_conf = Path("/etc/gdm3/custom.conf") if self.plat.is_debian \
+            else Path("/etc/gdm/custom.conf")
         if gdm3_conf.exists():
             text = gdm3_conf.read_text()
             if "WaylandEnable=false" not in text:
@@ -263,14 +276,14 @@ class LocalUbuntuSetup:
                 if "WaylandEnable=false" not in text:
                     text = text.replace("[daemon]", "[daemon]\nWaylandEnable=false", 1)
                 gdm3_conf.write_text(text)
-                self.log("Disabled Wayland in GDM3 (/etc/gdm3/custom.conf)", "SUCCESS")
+                self.log(f"Disabled Wayland in GDM ({gdm3_conf})", "SUCCESS")
             else:
-                self.log("Wayland already disabled in GDM3", "SUCCESS")
+                self.log("Wayland already disabled in GDM", "SUCCESS")
         else:
-            # Create a minimal gdm3 config if it doesn't exist
+            # Create a minimal gdm config if it doesn't exist
             gdm3_conf.parent.mkdir(parents=True, exist_ok=True)
             gdm3_conf.write_text("[daemon]\nWaylandEnable=false\n")
-            self.log("Created /etc/gdm3/custom.conf with Wayland disabled", "SUCCESS")
+            self.log(f"Created {gdm3_conf} with Wayland disabled", "SUCCESS")
 
         # 2. Polkit rule — prevents colour-manager auth dialogs in every xrdp session
         polkit_rule = """\
@@ -430,10 +443,11 @@ polkit.addRule(function(action, subject) {
         print(f"\n{Colors.GREEN}{Colors.BOLD}" + "\n".join(lines) + f"{Colors.ENDC}\n")
         input(f"{Colors.CYAN}Press Enter once you have saved the credentials...{Colors.ENDC}")
 
+        admin = self.plat.admin_group  # 'sudo' on Debian, 'wheel' on RHEL
         try:
-            self.run_command(f"useradd -m -s /bin/bash -G sudo,audio,video,input {username}")
+            self.run_command(f"useradd -m -s /bin/bash -G {admin},audio,video,input {username}")
         except subprocess.CalledProcessError:
-            self.run_command(f"useradd -m -s /bin/bash -G sudo,audio,video {username}")
+            self.run_command(f"useradd -m -s /bin/bash -G {admin},audio,video {username}")
 
         cp = subprocess.run(['chpasswd'], input=f"{username}:{password}", text=True, capture_output=True)
         if cp.returncode != 0:
@@ -478,17 +492,9 @@ polkit.addRule(function(action, subject) {
             self._save_state(tailscale_installed=True)
             return
 
-        codename = self.get_os_codename()
-        self.run_command(
-            f"curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/{codename}.noarmor.gpg "
-            f"| tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null"
-        )
-        self.run_command(
-            f"curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/{codename}.tailscale-keyring.list "
-            f"| tee /etc/apt/sources.list.d/tailscale.list"
-        )
-        self.run_command("apt-get update")
-        self.run_command("apt-get install -y tailscale")
+        # Adds the per-distro Tailscale repo (apt source or dnf .repo) and
+        # installs the client.
+        self.plat.add_tailscale_repo()
         self.log("Tailscale installed", "SUCCESS")
         self._save_state(tailscale_installed=True)
 
@@ -596,23 +602,18 @@ only affects incoming network connections.{Colors.ENDC}
 
         self.log("Applying firewall rules...")
 
-        # Ensure IPv6 filtering is enabled
-        self.run_command("sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw", check=False)
-        r = self.run_command("grep -c '^IPV6=' /etc/default/ufw", check=False)
-        if r.stdout.strip() == "0":
-            self.run_command("echo 'IPV6=yes' >> /etc/default/ufw")
-
-        self.run_command("ufw --force reset")
-        self.run_command("ufw default deny incoming")
-        self.run_command("ufw default allow outgoing")
-        self.run_command("ufw allow in on tailscale0")
-        self.run_command("ufw allow out on tailscale0")
+        # Firewall lockdown via the platform back-end (ufw on Debian,
+        # firewalld on RHEL). IPv6 is handled inside reset() where relevant.
+        fw = self.plat.firewall
+        fw.reset()
+        fw.default_deny_incoming()
+        fw.trust_interface("tailscale0")
 
         for subnet in ("100.64.0.0/10", "fd7a:115c:a1e0::/48"):
-            self.run_command(f"ufw allow from {subnet} to any port 22")
-            self.run_command(f"ufw allow from {subnet} to any port 3389")
+            fw.allow_from_to_port(subnet, 22)
+            fw.allow_from_to_port(subnet, 3389)
 
-        self.run_command("ufw --force enable")
+        fw.enable()
         self.log("Firewall locked down to Tailscale-only access", "SUCCESS")
         self._save_state(server_locked_down=True)
         return True
@@ -644,8 +645,7 @@ only affects incoming network connections.{Colors.ENDC}
         self.log("Installing Node.js and build tools...")
         print(f"\n  {Colors.WARNING}{Colors.BOLD}⚠  Note:{Colors.ENDC}{Colors.WARNING} This step can take 2–3 minutes and may appear to hang.{Colors.ENDC}")
         print(f"  {Colors.WARNING}   If progress stops, press Enter a few times to continue.{Colors.ENDC}\n")
-        self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
-        self.run_command("apt-get install -y nodejs build-essential cmake make g++ python3")
+        self.plat.install_node("22")
 
         self.log("Running official OpenClaw installer...")
         self.run_command(
@@ -681,7 +681,7 @@ only affects incoming network connections.{Colors.ENDC}
 
         self.log("Installing Homebrew (required for OpenClaw skills)...")
         # Extra deps Homebrew needs on Linux beyond what we already installed
-        self.run_command("apt-get install -y -qq file procps")
+        self.plat.pkg_install("file", "procps-ng" if self.plat.is_rhel else "procps")
 
         # Pre-create the Homebrew prefix as root and give the user ownership
         # so the installer doesn't need sudo to create /home/linuxbrew
@@ -717,32 +717,13 @@ only affects incoming network connections.{Colors.ENDC}
 
         print(f"\n{Colors.HEADER}=== GOOGLE CHROME INSTALLATION ==={Colors.ENDC}")
 
-        r = self.run_command("dpkg -l | grep google-chrome", check=False)
-        if r.returncode == 0:
+        if self.plat.pkg_installed("google-chrome-stable"):
             self.log("Chrome already installed", "SUCCESS")
             self._save_state(chrome_installed=True)
             return
 
-        try:
-            self.run_command(
-                "wget -q -O /tmp/chrome.deb "
-                "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
-            )
-            self.run_command("apt-get install -y /tmp/chrome.deb")
-            self.run_command("rm -f /tmp/chrome.deb")
-        except subprocess.CalledProcessError:
-            self.log("Fallback: installing Chrome via repository...", "WARNING")
-            self.run_command(
-                "wget -q -O /usr/share/keyrings/google-chrome.gpg "
-                "https://dl.google.com/linux/linux_signing_key.pub"
-            )
-            self.run_command(
-                'echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] '
-                'http://dl.google.com/linux/chrome/deb/ stable main" '
-                '> /etc/apt/sources.list.d/google-chrome.list'
-            )
-            self.run_command("apt-get update")
-            self.run_command("apt-get install -y google-chrome-stable")
+        # deb fast-path + repo fallback on Debian, official .rpm on RHEL
+        self.plat.install_chrome()
 
         r = self.run_command("google-chrome --version")
         self.log(f"Chrome installed: {r.stdout.strip()}", "SUCCESS")
@@ -822,6 +803,10 @@ WantedBy=timers.target
 
         print(f"\n{Colors.HEADER}=== SECURITY CHECK TOOL ==={Colors.ENDC}")
 
+        # Firewall verify + auto-fix fragments selected for the host stack
+        # (ufw on Debian, firewalld on RHEL); shared with the VPS scripts.
+        fw_check, fw_fix = self.plat.security_check_firewall_fragments()
+
         # The security-check script itself is identical to the VPS version
         security_script = r"""#!/bin/bash
 # SecureClaw Security Verification
@@ -842,7 +827,7 @@ fix_ok()  { echo -e "    ${GREEN}✓  $1${RESET}"; }
 fix_err() { echo -e "    ${RED}✗  $1${RESET}"; }
 
 ISSUES=0
-FIX_UFW=0; FIX_UFW6=0; FIX_TS_RULE=0; FIX_SSH_RULE=0; FIX_RDP_RULE=0
+FIX_FW=0; FIX_FW6=0; FIX_TS_RULE=0; FIX_SSH_RULE=0; FIX_RDP_RULE=0
 RESTART_SVCS=()
 
 clear
@@ -852,43 +837,7 @@ echo -e "${BOLD}  ║        🦞  SecureClaw Security Verification             
 echo -e "${BOLD}  ║        $(date '+%Y-%m-%d %H:%M:%S')                                 ║${RESET}"
 echo -e "${BOLD}  ╚══════════════════════════════════════════════════════════════╝${RESET}"
 
-section "Firewall (UFW)"
-ufw_out=$(ufw status verbose 2>/dev/null)
-if echo "$ufw_out" | grep -q "Status: active"; then
-    pass "UFW is active"
-else
-    fail "UFW is NOT active — machine is unprotected!"; FIX_UFW=1
-fi
-if grep -q "^IPV6=yes" /etc/default/ufw 2>/dev/null; then
-    pass "UFW IPv6 filtering is enabled"
-else
-    fail "UFW IPv6 filtering is disabled"; FIX_UFW6=1
-fi
-if echo "$ufw_out" | grep -q "tailscale0"; then
-    pass "Tailscale interface rules present"
-else
-    fail "Tailscale interface rules missing"; FIX_TS_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*22|22.*100\.64\.0\.0/10"; then
-    pass "SSH (22) restricted to Tailscale IPv4 subnet"
-else
-    fail "SSH (22) does not have a Tailscale IPv4 rule"; FIX_SSH_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "fd7a:115c:a1e0::/48.*22|22.*fd7a:115c:a1e0::/48"; then
-    pass "SSH (22) restricted to Tailscale IPv6 subnet"
-else
-    fail "SSH (22) does not have a Tailscale IPv6 rule"; FIX_SSH_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*3389|3389.*100\.64\.0\.0/10"; then
-    pass "RDP (3389) restricted to Tailscale IPv4 subnet"
-else
-    fail "RDP (3389) does not have a Tailscale IPv4 rule"; FIX_RDP_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "fd7a:115c:a1e0::/48.*3389|3389.*fd7a:115c:a1e0::/48"; then
-    pass "RDP (3389) restricted to Tailscale IPv6 subnet"
-else
-    fail "RDP (3389) does not have a Tailscale IPv6 rule"; FIX_RDP_RULE=1
-fi
+""" + fw_check + r"""
 
 section "Tailscale VPN"
 ts_ip=$(tailscale ip -4 2>/dev/null)
@@ -903,7 +852,7 @@ section "SSH (port 22)"
 ssh_listen=$(ss -tlnp 2>/dev/null | grep ':22 ')
 if [ -n "$ssh_listen" ]; then
     if echo "$ssh_listen" | grep -qE "0\.0\.0\.0:22|\*:22|:::22"; then
-        if [ "$FIX_UFW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
+        if [ "$FIX_FW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
             pass "SSH listening on all interfaces — restricted by UFW to Tailscale subnet only"
         else
             warn "SSH is listening on all interfaces and UFW rules need attention"
@@ -919,7 +868,7 @@ section "RDP (port 3389)"
 rdp_listen=$(ss -tlnp 2>/dev/null | grep ':3389 ')
 if [ -n "$rdp_listen" ]; then
     pass "XRDP is listening on port 3389"
-    info "Protected by UFW — only reachable via Tailscale (100.64.0.0/10)"
+    info "Protected by firewall — only reachable via Tailscale (100.64.0.0/10)"
 else
     warn "XRDP does not appear to be listening on 3389"
 fi
@@ -953,11 +902,11 @@ fi
 echo -e "  ${RED}${BOLD}  ✗  $ISSUES issue(s) found — review the output above.${RESET}"
 echo
 
-fixable=$((FIX_UFW + FIX_UFW6 + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
+fixable=$((FIX_FW + FIX_FW6 + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
 if [ "$fixable" -gt 0 ]; then
     echo -e "  ${CYAN}${BOLD}$fixable issue(s) can be fixed automatically:${RESET}"
-    [ "$FIX_UFW"      -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW"
-    [ "$FIX_UFW6"     -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW IPv6 filtering"
+    [ "$FIX_FW"      -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable firewall"
+    [ "$FIX_FW6"     -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable firewall IPv6 filtering"
     [ "$FIX_TS_RULE"  -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Add Tailscale interface rule"
     [ "$FIX_SSH_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict SSH to Tailscale subnets"
     [ "$FIX_RDP_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict RDP to Tailscale subnets"
@@ -971,28 +920,10 @@ if [ "$fixable" -gt 0 ]; then
     if [[ "$fix_ans" =~ ^[Yy]$ ]]; then
         echo -e "  ${BOLD}Applying fixes...${RESET}"
         echo
-        ufw_changed=0
-        [ "$FIX_UFW"  -eq 1 ] && { ufw --force enable && fix_ok "UFW enabled" || fix_err "Failed to enable UFW"; ufw_changed=1; }
-        [ "$FIX_UFW6" -eq 1 ] && { sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw; grep -q '^IPV6=' /etc/default/ufw || echo 'IPV6=yes' >> /etc/default/ufw; fix_ok "UFW IPv6 enabled"; ufw_changed=1; }
-        [ "$FIX_TS_RULE" -eq 1 ] && { ufw allow in on tailscale0 && ufw allow out on tailscale0 && fix_ok "Tailscale rules added" || fix_err "Failed"; ufw_changed=1; }
-        if [ "$FIX_SSH_RULE" -eq 1 ]; then
-            ufw delete allow 22/tcp 2>/dev/null || true
-            ufw delete allow 22 2>/dev/null || true
-            ufw delete allow OpenSSH 2>/dev/null || true
-            ufw allow from 100.64.0.0/10 to any port 22 proto tcp && \
-            ufw allow from fd7a:115c:a1e0::/48 to any port 22 proto tcp && \
-                fix_ok "SSH restricted to Tailscale" || fix_err "Failed"
-            ufw_changed=1
-        fi
-        if [ "$FIX_RDP_RULE" -eq 1 ]; then
-            ufw delete allow 3389/tcp 2>/dev/null || true
-            ufw delete allow 3389 2>/dev/null || true
-            ufw allow from 100.64.0.0/10 to any port 3389 proto tcp && \
-            ufw allow from fd7a:115c:a1e0::/48 to any port 3389 proto tcp && \
-                fix_ok "RDP restricted to Tailscale" || fix_err "Failed"
-            ufw_changed=1
-        fi
-        [ "$ufw_changed" -eq 1 ] && { ufw --force reload && fix_ok "UFW reloaded" || fix_err "UFW reload failed"; }
+        fw_changed=0
+
+""" + fw_fix + r"""
+
         for svc in "${RESTART_SVCS[@]}"; do
             systemctl enable --now "$svc" 2>/dev/null && fix_ok "$svc started" || fix_err "Could not start $svc"
         done
@@ -1091,11 +1022,15 @@ Categories=System;Security;
             f"sed -i 's/^REPO_BRANCH_OVERRIDE = None.*$/REPO_BRANCH_OVERRIDE = \"{branch}\"/' {install_bin}"
         )
 
-        self.run_command("apt-get install -y python3-gi gir1.2-gtk-3.0")
+        self.plat.pkg_install("gobject_gtk3", logical=True)
 
+        # Passwordless firewall-status check for the widget; group + command
+        # differ by distro (sudo/ufw vs wheel/firewall-cmd).
+        admin = self.plat.admin_group
+        fw_status_cmd = "/usr/sbin/ufw status" if self.plat.is_debian else "/usr/bin/firewall-cmd --state"
         sudoers_content = (
-            "# Allow sudo group to check UFW status without password (used by openclaw-widget)\n"
-            "%sudo ALL=(ALL) NOPASSWD: /usr/sbin/ufw status\n"
+            "# Allow admins to check firewall status without password (used by openclaw-widget)\n"
+            f"%{admin} ALL=(ALL) NOPASSWD: {fw_status_cmd}\n"
         )
         sudoers_path = "/etc/sudoers.d/openclaw-widget"
         with open(sudoers_path, "w") as f:
