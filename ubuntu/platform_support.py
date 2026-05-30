@@ -66,7 +66,9 @@ PACKAGE_MAP = {
     "buildtools":    {"debian": "build-essential g++",        "rhel": "gcc gcc-c++ make"},
     "gnupg":         {"debian": "gnupg2",                     "rhel": "gnupg2"},
     "apt_extras":    {"debian": "software-properties-common", "rhel": ""},  # no RHEL equiv
-    "xfce":          {"debian": "xfce4 xfce4-goodies",        "rhel": "@xfce"},  # dnf group
+    # RHEL: the dnf *environment* group id is @xfce-desktop-environment. dnf5
+    # (Fedora 41+) does not resolve the bare @xfce alias that dnf4 accepted.
+    "xfce":          {"debian": "xfce4 xfce4-goodies",        "rhel": "@xfce-desktop-environment"},
     "openssh_server":{"debian": "openssh-server",             "rhel": "openssh-server"},
 }
 
