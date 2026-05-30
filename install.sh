@@ -83,9 +83,16 @@ check_root() {
     fi
 }
 
-check_ubuntu() {
-    if ! command -v apt &> /dev/null; then
-        print_error "This installer only supports Ubuntu/Debian systems."
+# Detects the host package manager and exports PKG_FAMILY ("debian" or "rhel").
+# SecureClaw targets Ubuntu/Debian but also supports RHEL-family systems
+# (Fedora, Rocky, AlmaLinux) via the platform abstraction in the Python scripts.
+check_supported() {
+    if command -v apt-get &> /dev/null; then
+        PKG_FAMILY="debian"
+    elif command -v dnf &> /dev/null; then
+        PKG_FAMILY="rhel"
+    else
+        print_error "Unsupported system: need apt (Debian/Ubuntu) or dnf (Fedora/RHEL/Rocky)."
         exit 1
     fi
 }
@@ -146,12 +153,21 @@ detect_mode() {
 # ── Steps ─────────────────────────────────────────────────────────────────────
 install_python() {
     print_step 2 4 "Installing Python and dependencies...    "
-    if ! command -v python3 &> /dev/null; then
-        apt-get update -qq
-        apt-get install -y -qq python3 python3-pip python3-tk > /dev/null 2>&1
+    if [[ "$PKG_FAMILY" == "rhel" ]]; then
+        # tkinter ships as python3-tkinter on RHEL family
+        if ! command -v python3 &> /dev/null; then
+            dnf -y install python3 python3-pip python3-tkinter > /dev/null 2>&1
+        else
+            dnf -y install python3-tkinter > /dev/null 2>&1
+        fi
     else
-        # Ensure tkinter is present even if python3 was pre-installed
-        apt-get install -y -qq python3-tk > /dev/null 2>&1
+        if ! command -v python3 &> /dev/null; then
+            apt-get update -qq
+            apt-get install -y -qq python3 python3-pip python3-tk > /dev/null 2>&1
+        else
+            # Ensure tkinter is present even if python3 was pre-installed
+            apt-get install -y -qq python3-tk > /dev/null 2>&1
+        fi
     fi
     print_ok
 }
@@ -168,6 +184,9 @@ install_scripts() {
     fi
 
     if [[ -n "$SCRIPT_DIR" ]]; then
+        # platform_support.py is the shared distro-abstraction module imported
+        # by the setup scripts — it must sit beside them in /usr/local/bin.
+        cp "$SCRIPT_DIR/platform_support.py" /usr/local/bin/
         cp "$SCRIPT_DIR/universal_vps_setup.py" /usr/local/bin/
         cp "$SCRIPT_DIR/post_lockdown_setup.py" /usr/local/bin/
         chmod +x /usr/local/bin/universal_vps_setup.py
@@ -180,8 +199,13 @@ install_scripts() {
         # Repo not available locally — download from GitHub
         REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
         if ! command -v curl &> /dev/null; then
-            apt-get install -y -qq curl > /dev/null 2>&1
+            if [[ "$PKG_FAMILY" == "rhel" ]]; then
+                dnf -y install curl > /dev/null 2>&1
+            else
+                apt-get install -y -qq curl > /dev/null 2>&1
+            fi
         fi
+        curl -fsSL "$REPO_BASE/ubuntu/platform_support.py" -o /usr/local/bin/platform_support.py
         curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py" -o /usr/local/bin/universal_vps_setup.py
         curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py" -o /usr/local/bin/post_lockdown_setup.py
         chmod +x /usr/local/bin/universal_vps_setup.py
@@ -201,6 +225,7 @@ create_shortcuts() {
     cat > /usr/local/bin/vps-setup << EOF
 #!/bin/bash
 REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
+curl -fsSL "\$REPO_BASE/ubuntu/platform_support.py?\$(date +%s)" -o /usr/local/bin/platform_support.py || true
 curl -fsSL "\$REPO_BASE/ubuntu/universal_vps_setup.py?\$(date +%s)" -o /usr/local/bin/universal_vps_setup.py \
     && chmod +x /usr/local/bin/universal_vps_setup.py \
     || echo "  Warning: could not fetch latest script, running cached version"
@@ -210,6 +235,7 @@ EOF
     cat > /usr/local/bin/vps-post-setup << EOF
 #!/bin/bash
 REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
+curl -fsSL "\$REPO_BASE/ubuntu/platform_support.py?\$(date +%s)" -o /usr/local/bin/platform_support.py || true
 if curl -fsSL "\$REPO_BASE/ubuntu/post_lockdown_setup.py?\$(date +%s)" -o /usr/local/bin/post_lockdown_setup.py; then
     chmod +x /usr/local/bin/post_lockdown_setup.py
     sed -i 's/^REPO_BRANCH_OVERRIDE = None.*\$/REPO_BRANCH_OVERRIDE = "${BRANCH}"/' /usr/local/bin/post_lockdown_setup.py
@@ -222,6 +248,7 @@ EOF
     cat > /usr/local/bin/local-setup << EOF
 #!/bin/bash
 REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
+curl -fsSL "\$REPO_BASE/ubuntu/platform_support.py?\$(date +%s)" -o /usr/local/bin/platform_support.py || true
 if curl -fsSL "\$REPO_BASE/ubuntu/local_setup.py?\$(date +%s)" -o /usr/local/bin/local_setup.py; then
     chmod +x /usr/local/bin/local_setup.py
 else
@@ -306,7 +333,7 @@ main() {
     print_banner
 
     check_root
-    check_ubuntu
+    check_supported
 
     # If stdin is not a terminal (e.g. curl | bash), reconnect to the
     # controlling terminal so interactive read prompts work. Falls back

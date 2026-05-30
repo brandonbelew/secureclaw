@@ -20,6 +20,7 @@ import threading
 import secrets
 import string
 import re
+from platform_support import Platform
 
 STATE_FILE = "/var/lib/vps-setup/state.json"
 
@@ -53,6 +54,8 @@ class UniversalVPSSetup:
     def __init__(self):
         self.setup_log = []
         self.os_info = self._detect_os_info()
+        # Distro abstraction (package manager, firewall, repos, group/service names)
+        self.plat = Platform(self.run_command, self.os_info)
         self.is_desktop_env = self.detect_desktop_environment()
         self.gui_available = self.is_desktop_env and self.check_display()
         self.initial_access_method = self.detect_access_method()
@@ -458,9 +461,9 @@ class UniversalVPSSetup:
         if self.gui_available and self.initial_access_method == "RDP":
             self.show_gui_progress("Updating system packages...", "This may take several minutes")
 
-        self.run_command("apt update", capture_output=False)
-        self.run_command("apt upgrade -y", capture_output=False)
-        self.run_command("apt install -y curl wget gnupg2 software-properties-common python3-tk")
+        self.plat.pkg_refresh()
+        self.plat.pkg_upgrade()
+        self.plat.pkg_install("curl", "wget", "gnupg", "apt_extras", "tk", logical=True)
 
         self.log("System update completed", "SUCCESS")
         self._save_state(system_updated=True)
@@ -473,19 +476,19 @@ class UniversalVPSSetup:
 
         print(f"\n{Colors.HEADER}=== DESKTOP ENVIRONMENT DETECTION ==={Colors.ENDC}")
 
-        result = self.run_command("dpkg -l xfce4-session 2>/dev/null | grep '^ii'", check=False)
-        if result.returncode == 0:
+        if self.plat.pkg_installed("xfce4-session"):
             detected = "xfce"
+        elif self.plat.pkg_installed("gnome-shell") or \
+                self.plat.pkg_installed("gdm3") or self.plat.pkg_installed("gdm"):
+            detected = "gnome"
         else:
-            result = self.run_command(
-                "dpkg -l gnome-shell 2>/dev/null | grep '^ii' || dpkg -l gdm3 2>/dev/null | grep '^ii'",
-                check=False
-            )
-            detected = "gnome" if result.returncode == 0 else "none"
+            detected = "none"
 
         if detected == "none":
             self.log("No desktop environment found — installing XFCE + LightDM + xrdp...", "WARNING")
-            self.run_command("apt install -y xfce4 xfce4-goodies lightdm xrdp", capture_output=False)
+            # xrdp lives in EPEL on RHEL family; ensure_extra_repos() enables it.
+            self.plat.ensure_extra_repos()
+            self.plat.pkg_install("xfce", "lightdm", "xrdp", logical=True)
 
             Path("/etc/lightdm").mkdir(parents=True, exist_ok=True)
             with open("/etc/lightdm/lightdm.conf", "w") as f:
@@ -498,10 +501,10 @@ class UniversalVPSSetup:
         else:
             self.log(f"Detected desktop environment: {detected}", "SUCCESS")
 
-            result = self.run_command("dpkg -l xrdp 2>/dev/null | grep '^ii'", check=False)
-            if result.returncode != 0:
+            if not self.plat.pkg_installed("xrdp"):
                 self.log("xrdp not found on existing desktop — installing xrdp only...", "WARNING")
-                self.run_command("apt install -y xrdp", capture_output=False)
+                self.plat.ensure_extra_repos()
+                self.plat.pkg_install("xrdp")
                 self.service_command("enable", "xrdp")
 
         self.desktop_type = detected
@@ -626,11 +629,12 @@ class UniversalVPSSetup:
         else:
             password = generated_password
 
+        admin = self.plat.admin_group  # 'sudo' on Debian, 'wheel' on RHEL
         try:
-            self.run_command(f"useradd -m -s /bin/bash -G sudo,audio,video,input {username}")
+            self.run_command(f"useradd -m -s /bin/bash -G {admin},audio,video,input {username}")
         except subprocess.CalledProcessError:
             self.log("'input' group not found, retrying without it...", "WARNING")
-            self.run_command(f"useradd -m -s /bin/bash -G sudo,audio,video {username}")
+            self.run_command(f"useradd -m -s /bin/bash -G {admin},audio,video {username}")
 
         cp_result = subprocess.run(
             ['chpasswd'],
@@ -682,12 +686,12 @@ class UniversalVPSSetup:
         changes_made = []
         needs_xrdp_restart = False
 
-        result = self.run_command("dpkg -l xrdp 2>/dev/null | grep '^ii'", check=False)
-        if result.returncode != 0:
+        if not self.plat.pkg_installed("xrdp"):
             self.log("xrdp not found, installing...")
             if self.gui_available:
                 self.show_gui_progress("Installing xrdp", "Setting up remote desktop server...")
-            self.run_command("apt install -y xrdp", capture_output=False)
+            self.plat.ensure_extra_repos()
+            self.plat.pkg_install("xrdp")
             needs_xrdp_restart = True
             changes_made.append("xrdp installed")
         else:
@@ -729,7 +733,11 @@ code=20
         else:
             self.log("Unknown desktop type — skipping sleep/lock config", "WARNING")
 
-        self.run_command("ufw allow 3389/tcp", check=False)
+        # Pre-lockdown convenience rule; the real Tailscale-scoped lockdown
+        # happens later in lockdown_server(). firewalld is zone-based, so an
+        # open 3389 rule here only matters under ufw — skip it elsewhere.
+        if self.plat.is_debian:
+            self.run_command("ufw allow 3389/tcp", check=False)
 
         if not changes_made:
             self.log("RDP session persistence is already properly configured - no changes needed", "SUCCESS")
@@ -869,11 +877,9 @@ lock-enabled=false
         if self.gui_available:
             self.show_gui_progress("Installing Tailscale", "Adding repository and installing VPN client...")
 
-        codename = self.get_os_codename()
-        self.run_command(f"curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/{codename}.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null")
-        self.run_command(f'curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/{codename}.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list')
-        self.run_command("apt update")
-        self.run_command("apt install -y tailscale")
+        # Adds the per-distro Tailscale repo (apt source or dnf .repo) and
+        # installs the client.
+        self.plat.add_tailscale_repo()
 
         self.log("Tailscale installed successfully", "SUCCESS")
         self._save_state(tailscale_installed=True)
@@ -1152,27 +1158,21 @@ TAILSCALE TROUBLESHOOTING:
 
         self.log("Beginning server lockdown...")
 
-        # Explicitly enable IPv6 filtering before resetting rules —
-        # do not rely on the distro default being correct
-        self.run_command("sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw", check=False)
-        result = self.run_command("grep -c '^IPV6=' /etc/default/ufw", check=False)
-        if result.stdout.strip() == "0":
-            self.run_command("echo 'IPV6=yes' >> /etc/default/ufw")
-        self.log("UFW IPv6 filtering confirmed enabled")
-
-        self.run_command("ufw --force reset")
-        self.run_command("ufw default deny incoming")
-        self.run_command("ufw default allow outgoing")
-        self.run_command("ufw allow in on tailscale0")
-        self.run_command("ufw allow out on tailscale0")
+        # Firewall lockdown via the platform back-end (ufw on Debian,
+        # firewalld on RHEL). IPv6 is handled inside reset() where relevant.
+        fw = self.plat.firewall
+        fw.reset()
+        fw.default_deny_incoming()
+        fw.trust_interface("tailscale0")
+        self.log("Firewall reset; Tailscale interface trusted")
 
         # Allow SSH and RDP from both Tailscale IPv4 CGNAT and IPv6 CGNAT ranges
         tailscale_subnet_v4 = "100.64.0.0/10"
         tailscale_subnet_v6 = "fd7a:115c:a1e0::/48"
         for subnet in (tailscale_subnet_v4, tailscale_subnet_v6):
-            self.run_command(f"ufw allow from {subnet} to any port 22")
-            self.run_command(f"ufw allow from {subnet} to any port 3389")
-        self.run_command("ufw --force enable")
+            fw.allow_from_to_port(subnet, 22)
+            fw.allow_from_to_port(subnet, 3389)
+        fw.enable()
 
         if self.tailscale_ip:
             # Only append ListenAddress if not already present
@@ -1259,8 +1259,10 @@ TAILSCALE TROUBLESHOOTING:
         self.log("Installing Node.js and build tools...")
         print(f"\n  {Colors.WARNING}{Colors.BOLD}⚠  Note:{Colors.ENDC}{Colors.WARNING} This step can take 2–3 minutes and may appear to hang.{Colors.ENDC}")
         print(f"  {Colors.WARNING}   If progress stops, press Enter a few times to continue.{Colors.ENDC}\n")
-        self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
-        self.run_command("apt-get install -y nodejs build-essential cmake make g++ python3")
+        # NodeSource publishes both deb and rpm setup scripts; install_node()
+        # picks the right one and pulls in the build toolchain (build-essential
+        # on Debian, gcc/gcc-c++/make on RHEL).
+        self.plat.install_node("22")
 
         # Run the official OpenClaw installer as the target user.
         # Node.js is already present so the installer skips the sudo step.
@@ -1297,7 +1299,7 @@ TAILSCALE TROUBLESHOOTING:
 
         self.log("Installing Homebrew (required for OpenClaw skills)...")
         # Extra deps Homebrew needs on Linux beyond what we already installed
-        self.run_command("apt-get install -y -qq file procps")
+        self.plat.pkg_install("file", "procps-ng" if self.plat.is_rhel else "procps")
 
         # Pre-create the Homebrew prefix as root and give the user ownership
         # so the installer doesn't need sudo to create /home/linuxbrew
@@ -1335,28 +1337,200 @@ TAILSCALE TROUBLESHOOTING:
         print(f"\n{Colors.HEADER}=== GOOGLE CHROME INSTALLATION ==={Colors.ENDC}")
         self.log("Installing Google Chrome...")
 
-        result = self.run_command("dpkg -l | grep google-chrome", check=False)
-        if result.returncode == 0:
+        if self.plat.pkg_installed("google-chrome-stable"):
             self.log("Google Chrome is already installed", "SUCCESS")
             self._save_state(chrome_installed=True)
             return
 
-        try:
-            self.log("Downloading Chrome package...")
-            self.run_command("wget -q -O /tmp/google-chrome-stable_current_amd64.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb")
-            self.run_command("apt install -y /tmp/google-chrome-stable_current_amd64.deb")
-            self.run_command("rm -f /tmp/google-chrome-stable_current_amd64.deb")
-
-        except subprocess.CalledProcessError:
-            self.log("Fallback: Installing Chrome via repository...", "WARNING")
-            self.run_command("wget -q -O /usr/share/keyrings/google-chrome.gpg https://dl.google.com/linux/linux_signing_key.pub")
-            self.run_command('echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list')
-            self.run_command("apt update")
-            self.run_command("apt install -y google-chrome-stable")
+        self.log("Downloading Chrome package...")
+        # Debian: .deb direct download with apt-repo fallback. RHEL: official
+        # .rpm (which carries the yum repo for future updates).
+        self.plat.install_chrome()
 
         result = self.run_command("google-chrome --version")
         self.log(f"Chrome installed: {result.stdout.strip()}", "SUCCESS")
         self._save_state(chrome_installed=True)
+
+    def _security_check_firewall_fragments(self):
+        """Return (fw_check, fw_fix) bash fragments for the security-check tool,
+        selected for the host firewall stack (ufw on Debian, firewalld on RHEL).
+
+        Contract honoured by both:
+          * read live firewall state into $fw_out
+          * set FIX_FW / FIX_FW6 / FIX_TS_RULE / FIX_SSH_RULE / FIX_RDP_RULE
+          * fw_fix applies any requested fixes and sets fw_changed=1 + reloads
+        """
+        if not self.plat.is_rhel:
+            fw_check = r"""# ── Firewall ──────────────────────────────────────────────────────────────────
+section "Firewall (UFW)"
+fw_out=$(ufw status verbose 2>/dev/null)
+if echo "$fw_out" | grep -q "Status: active"; then
+    pass "UFW is active"
+else
+    fail "UFW is NOT active — server is unprotected!"; FIX_FW=1
+fi
+if grep -q "^IPV6=yes" /etc/default/ufw 2>/dev/null; then
+    pass "UFW IPv6 filtering is enabled"
+else
+    fail "UFW IPv6 filtering is disabled — IPv6 traffic may be unprotected!"; FIX_FW6=1
+fi
+if echo "$fw_out" | grep -q "tailscale0"; then
+    pass "Tailscale interface rules present"
+else
+    fail "Tailscale interface rules missing"; FIX_TS_RULE=1
+fi
+if echo "$fw_out" | grep -qE "100\.64\.0\.0/10.*22|22.*100\.64\.0\.0/10"; then
+    pass "SSH (22) restricted to Tailscale IPv4 subnet"
+else
+    fail "SSH (22) does not have a Tailscale IPv4 rule"; FIX_SSH_RULE=1
+fi
+if echo "$fw_out" | grep -qE "fd7a:115c:a1e0::/48.*22|22.*fd7a:115c:a1e0::/48"; then
+    pass "SSH (22) restricted to Tailscale IPv6 subnet"
+else
+    fail "SSH (22) does not have a Tailscale IPv6 rule"; FIX_SSH_RULE=1
+fi
+if echo "$fw_out" | grep -qE "100\.64\.0\.0/10.*3389|3389.*100\.64\.0\.0/10"; then
+    pass "RDP (3389) restricted to Tailscale IPv4 subnet"
+else
+    fail "RDP (3389) does not have a Tailscale IPv4 rule"; FIX_RDP_RULE=1
+fi
+if echo "$fw_out" | grep -qE "fd7a:115c:a1e0::/48.*3389|3389.*fd7a:115c:a1e0::/48"; then
+    pass "RDP (3389) restricted to Tailscale IPv6 subnet"
+else
+    fail "RDP (3389) does not have a Tailscale IPv6 rule"; FIX_RDP_RULE=1
+fi"""
+
+            fw_fix = r"""        if [ "$FIX_FW" -eq 1 ]; then
+            echo -e "  → Enabling UFW..."
+            ufw --force enable && fix_ok "UFW enabled" || fix_err "Failed to enable UFW"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_FW6" -eq 1 ]; then
+            echo -e "  → Enabling UFW IPv6 filtering..."
+            sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw
+            grep -q '^IPV6=' /etc/default/ufw || echo 'IPV6=yes' >> /etc/default/ufw
+            fix_ok "UFW IPv6 filtering enabled"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_TS_RULE" -eq 1 ]; then
+            echo -e "  → Adding Tailscale interface rules..."
+            ufw allow in on tailscale0 && \
+            ufw allow out on tailscale0 && \
+            fix_ok "Tailscale interface rules added" || fix_err "Failed to add Tailscale rules"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_SSH_RULE" -eq 1 ]; then
+            echo -e "  → Restricting SSH to Tailscale subnets (IPv4 + IPv6)..."
+            ufw delete allow 22/tcp  2>/dev/null || true
+            ufw delete allow 22      2>/dev/null || true
+            ufw delete allow OpenSSH 2>/dev/null || true
+            ufw allow from 100.64.0.0/10       to any port 22 proto tcp && \
+            ufw allow from fd7a:115c:a1e0::/48 to any port 22 proto tcp && \
+                fix_ok "SSH restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict SSH"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_RDP_RULE" -eq 1 ]; then
+            echo -e "  → Restricting RDP to Tailscale subnets (IPv4 + IPv6)..."
+            ufw delete allow 3389/tcp 2>/dev/null || true
+            ufw delete allow 3389     2>/dev/null || true
+            ufw allow from 100.64.0.0/10       to any port 3389 proto tcp && \
+            ufw allow from fd7a:115c:a1e0::/48 to any port 3389 proto tcp && \
+                fix_ok "RDP restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict RDP"
+            fw_changed=1
+        fi
+
+        if [ "$fw_changed" -eq 1 ]; then
+            echo -e "  → Reloading UFW..."
+            ufw --force reload && fix_ok "UFW reloaded" || fix_err "UFW reload failed"
+        fi"""
+            return fw_check, fw_fix
+
+        # ── RHEL family: firewalld ──────────────────────────────────────────
+        # firewalld is zone-based: default zone 'drop' = deny incoming, the
+        # tailscale0 interface lives in the 'trusted' zone, and per-subnet
+        # access is expressed as rich rules. IPv6 is filtered natively, so
+        # there is no separate IPv6 toggle (FIX_FW6 stays 0).
+        fw_check = r"""# ── Firewall ──────────────────────────────────────────────────────────────────
+section "Firewall (firewalld)"
+if systemctl is-active --quiet firewalld; then
+    pass "firewalld is active"
+else
+    fail "firewalld is NOT active — server is unprotected!"; FIX_FW=1
+fi
+fw_out=$(firewall-cmd --list-all-zones 2>/dev/null)
+rich=$(firewall-cmd --list-rich-rules 2>/dev/null)
+if [ "$(firewall-cmd --get-default-zone 2>/dev/null)" = "drop" ]; then
+    pass "Default zone is 'drop' (incoming denied)"
+else
+    fail "Default zone is not 'drop' — incoming traffic may be allowed!"; FIX_FW=1
+fi
+pass "IPv6 filtering handled natively by firewalld"
+if firewall-cmd --zone=trusted --list-interfaces 2>/dev/null | grep -qw tailscale0; then
+    pass "Tailscale interface is in the trusted zone"
+else
+    fail "Tailscale interface not in trusted zone"; FIX_TS_RULE=1
+fi
+if echo "$rich" | grep 'family="ipv4"' | grep '100.64.0.0/10' | grep -q 'port="22"'; then
+    pass "SSH (22) restricted to Tailscale IPv4 subnet"
+else
+    fail "SSH (22) does not have a Tailscale IPv4 rule"; FIX_SSH_RULE=1
+fi
+if echo "$rich" | grep 'family="ipv6"' | grep 'fd7a:115c:a1e0::/48' | grep -q 'port="22"'; then
+    pass "SSH (22) restricted to Tailscale IPv6 subnet"
+else
+    fail "SSH (22) does not have a Tailscale IPv6 rule"; FIX_SSH_RULE=1
+fi
+if echo "$rich" | grep 'family="ipv4"' | grep '100.64.0.0/10' | grep -q 'port="3389"'; then
+    pass "RDP (3389) restricted to Tailscale IPv4 subnet"
+else
+    fail "RDP (3389) does not have a Tailscale IPv4 rule"; FIX_RDP_RULE=1
+fi
+if echo "$rich" | grep 'family="ipv6"' | grep 'fd7a:115c:a1e0::/48' | grep -q 'port="3389"'; then
+    pass "RDP (3389) restricted to Tailscale IPv6 subnet"
+else
+    fail "RDP (3389) does not have a Tailscale IPv6 rule"; FIX_RDP_RULE=1
+fi"""
+
+        fw_fix = r"""        if [ "$FIX_FW" -eq 1 ]; then
+            echo -e "  → Enabling firewalld and setting default zone to drop..."
+            systemctl enable --now firewalld && \
+            firewall-cmd --set-default-zone=drop && \
+                fix_ok "firewalld enabled, default zone = drop" || fix_err "Failed to enable firewalld"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_TS_RULE" -eq 1 ]; then
+            echo -e "  → Adding Tailscale interface to trusted zone..."
+            firewall-cmd --permanent --zone=trusted --add-interface=tailscale0 && \
+                fix_ok "Tailscale interface trusted" || fix_err "Failed to trust tailscale0"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_SSH_RULE" -eq 1 ]; then
+            echo -e "  → Restricting SSH to Tailscale subnets (IPv4 + IPv6)..."
+            firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=100.64.0.0/10 port port=22 protocol=tcp accept' && \
+            firewall-cmd --permanent --add-rich-rule='rule family=ipv6 source address=fd7a:115c:a1e0::/48 port port=22 protocol=tcp accept' && \
+                fix_ok "SSH restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict SSH"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_RDP_RULE" -eq 1 ]; then
+            echo -e "  → Restricting RDP to Tailscale subnets (IPv4 + IPv6)..."
+            firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=100.64.0.0/10 port port=3389 protocol=tcp accept' && \
+            firewall-cmd --permanent --add-rich-rule='rule family=ipv6 source address=fd7a:115c:a1e0::/48 port port=3389 protocol=tcp accept' && \
+                fix_ok "RDP restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict RDP"
+            fw_changed=1
+        fi
+
+        if [ "$fw_changed" -eq 1 ]; then
+            echo -e "  → Reloading firewalld..."
+            firewall-cmd --reload && fix_ok "firewalld reloaded" || fix_err "firewalld reload failed"
+        fi"""
+        return fw_check, fw_fix
 
     def install_security_check(self):
         """Install the desktop security verification script"""
@@ -1366,6 +1540,12 @@ TAILSCALE TROUBLESHOOTING:
 
         print(f"\n{Colors.HEADER}=== SECURITY CHECK TOOL ==={Colors.ENDC}")
         self.log("Installing security check tool...")
+
+        # The firewall verification + auto-fix differ by stack (ufw vs
+        # firewalld). Both fragments honour the same contract: they read the
+        # live firewall state and set FIX_FW / FIX_FW6 / FIX_TS_RULE /
+        # FIX_SSH_RULE / FIX_RDP_RULE, populating $fw_out for later sections.
+        fw_check, fw_fix = self._security_check_firewall_fragments()
 
         script = r"""#!/bin/bash
 # SecureClaw Security Verification
@@ -1387,8 +1567,8 @@ fix_ok()  { echo -e "    ${GREEN}✓  $1${RESET}"; }
 fix_err() { echo -e "    ${RED}✗  $1${RESET}"; }
 
 ISSUES=0
-FIX_UFW=0
-FIX_UFW6=0
+FIX_FW=0
+FIX_FW6=0
 FIX_TS_RULE=0
 FIX_SSH_RULE=0
 FIX_RDP_RULE=0
@@ -1401,44 +1581,7 @@ echo -e "${BOLD}  ║        🦞  SecureClaw Security Verification             
 echo -e "${BOLD}  ║        $(date '+%Y-%m-%d %H:%M:%S')                                 ║${RESET}"
 echo -e "${BOLD}  ╚══════════════════════════════════════════════════════════════╝${RESET}"
 
-# ── Firewall ──────────────────────────────────────────────────────────────────
-section "Firewall (UFW)"
-ufw_out=$(ufw status verbose 2>/dev/null)
-if echo "$ufw_out" | grep -q "Status: active"; then
-    pass "UFW is active"
-else
-    fail "UFW is NOT active — server is unprotected!"; FIX_UFW=1
-fi
-if grep -q "^IPV6=yes" /etc/default/ufw 2>/dev/null; then
-    pass "UFW IPv6 filtering is enabled"
-else
-    fail "UFW IPv6 filtering is disabled — IPv6 traffic may be unprotected!"; FIX_UFW6=1
-fi
-if echo "$ufw_out" | grep -q "tailscale0"; then
-    pass "Tailscale interface rules present"
-else
-    fail "Tailscale interface rules missing"; FIX_TS_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*22|22.*100\.64\.0\.0/10"; then
-    pass "SSH (22) restricted to Tailscale IPv4 subnet"
-else
-    fail "SSH (22) does not have a Tailscale IPv4 rule"; FIX_SSH_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "fd7a:115c:a1e0::/48.*22|22.*fd7a:115c:a1e0::/48"; then
-    pass "SSH (22) restricted to Tailscale IPv6 subnet"
-else
-    fail "SSH (22) does not have a Tailscale IPv6 rule"; FIX_SSH_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*3389|3389.*100\.64\.0\.0/10"; then
-    pass "RDP (3389) restricted to Tailscale IPv4 subnet"
-else
-    fail "RDP (3389) does not have a Tailscale IPv4 rule"; FIX_RDP_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "fd7a:115c:a1e0::/48.*3389|3389.*fd7a:115c:a1e0::/48"; then
-    pass "RDP (3389) restricted to Tailscale IPv6 subnet"
-else
-    fail "RDP (3389) does not have a Tailscale IPv6 rule"; FIX_RDP_RULE=1
-fi
+""" + fw_check + r"""
 
 # ── Tailscale ─────────────────────────────────────────────────────────────────
 section "Tailscale VPN"
@@ -1455,7 +1598,7 @@ section "SSH (port 22)"
 ssh_listen=$(ss -tlnp 2>/dev/null | grep ':22 ')
 if [ -n "$ssh_listen" ]; then
     if echo "$ssh_listen" | grep -qE "0\.0\.0\.0:22|\*:22|:::22"; then
-        if [ "$FIX_UFW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
+        if [ "$FIX_FW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
             pass "SSH listening on all interfaces — access restricted by UFW to Tailscale subnet only"
         else
             warn "SSH is listening on all interfaces and UFW rules need attention (see Firewall section)"
@@ -1472,7 +1615,7 @@ section "RDP (port 3389)"
 rdp_listen=$(ss -tlnp 2>/dev/null | grep ':3389 ')
 if [ -n "$rdp_listen" ]; then
     pass "XRDP is listening on port 3389"
-    info "Protected by UFW — only reachable via Tailscale (100.64.0.0/10)"
+    info "Protected by firewall — only reachable via Tailscale (100.64.0.0/10)"
 else
     warn "XRDP does not appear to be listening on 3389"
 fi
@@ -1484,7 +1627,7 @@ if systemctl is-active --quiet openclaw; then
     oc_ports=$(ss -tlnp 2>/dev/null | grep -i openclaw | awk '{print $4}' | sed 's/.*://' | sort -u)
     if [ -n "$oc_ports" ]; then
         for port in $oc_ports; do
-            if echo "$ufw_out" | grep -q "$port"; then
+            if echo "$fw_out" | grep -q "$port"; then
                 pass "OpenClaw port $port has an explicit UFW rule"
             else
                 info "OpenClaw port $port — covered by UFW default deny incoming"
@@ -1522,12 +1665,12 @@ echo -e "  ${RED}${BOLD}  ✗  $ISSUES issue(s) found — review the output abov
 echo
 
 # ── Auto-fix ──────────────────────────────────────────────────────────────────
-fixable=$((FIX_UFW + FIX_UFW6 + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
+fixable=$((FIX_FW + FIX_FW6 + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
 
 if [ "$fixable" -gt 0 ]; then
     echo -e "  ${CYAN}${BOLD}$fixable issue(s) can be fixed automatically:${RESET}"
-    [ "$FIX_UFW"      -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW"
-    [ "$FIX_UFW6"     -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW IPv6 filtering"
+    [ "$FIX_FW"      -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable firewall"
+    [ "$FIX_FW6"     -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable firewall IPv6 filtering"
     [ "$FIX_TS_RULE"  -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Add Tailscale interface rule"
     [ "$FIX_SSH_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict SSH to Tailscale subnets (IPv4 + IPv6)"
     [ "$FIX_RDP_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict RDP to Tailscale subnets (IPv4 + IPv6)"
@@ -1541,55 +1684,9 @@ if [ "$fixable" -gt 0 ]; then
     if [[ "$fix_ans" =~ ^[Yy]$ ]]; then
         echo -e "  ${BOLD}Applying fixes...${RESET}"
         echo
-        ufw_changed=0
+        fw_changed=0
 
-        if [ "$FIX_UFW" -eq 1 ]; then
-            echo -e "  → Enabling UFW..."
-            ufw --force enable && fix_ok "UFW enabled" || fix_err "Failed to enable UFW"
-            ufw_changed=1
-        fi
-
-        if [ "$FIX_UFW6" -eq 1 ]; then
-            echo -e "  → Enabling UFW IPv6 filtering..."
-            sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw
-            grep -q '^IPV6=' /etc/default/ufw || echo 'IPV6=yes' >> /etc/default/ufw
-            fix_ok "UFW IPv6 filtering enabled"
-            ufw_changed=1
-        fi
-
-        if [ "$FIX_TS_RULE" -eq 1 ]; then
-            echo -e "  → Adding Tailscale interface rules..."
-            ufw allow in on tailscale0 && \
-            ufw allow out on tailscale0 && \
-            fix_ok "Tailscale interface rules added" || fix_err "Failed to add Tailscale rules"
-            ufw_changed=1
-        fi
-
-        if [ "$FIX_SSH_RULE" -eq 1 ]; then
-            echo -e "  → Restricting SSH to Tailscale subnets (IPv4 + IPv6)..."
-            ufw delete allow 22/tcp  2>/dev/null || true
-            ufw delete allow 22      2>/dev/null || true
-            ufw delete allow OpenSSH 2>/dev/null || true
-            ufw allow from 100.64.0.0/10       to any port 22 proto tcp && \
-            ufw allow from fd7a:115c:a1e0::/48 to any port 22 proto tcp && \
-                fix_ok "SSH restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict SSH"
-            ufw_changed=1
-        fi
-
-        if [ "$FIX_RDP_RULE" -eq 1 ]; then
-            echo -e "  → Restricting RDP to Tailscale subnets (IPv4 + IPv6)..."
-            ufw delete allow 3389/tcp 2>/dev/null || true
-            ufw delete allow 3389     2>/dev/null || true
-            ufw allow from 100.64.0.0/10       to any port 3389 proto tcp && \
-            ufw allow from fd7a:115c:a1e0::/48 to any port 3389 proto tcp && \
-                fix_ok "RDP restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict RDP"
-            ufw_changed=1
-        fi
-
-        if [ "$ufw_changed" -eq 1 ]; then
-            echo -e "  → Reloading UFW..."
-            ufw --force reload && fix_ok "UFW reloaded" || fix_err "UFW reload failed"
-        fi
+""" + fw_fix + r"""
 
         for svc in "${RESTART_SVCS[@]}"; do
             echo -e "  → Starting $svc..."

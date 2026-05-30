@@ -148,11 +148,44 @@ class Platform:
         else:
             self.run(f"dnf -y install {path}")
 
-    # ── third-party repos ───────────────────────────────────────────────────
-    def add_chrome_repo_and_install(self):
-        """Google Chrome. RHEL has an official .rpm + yum repo; Debian uses the
-        signed apt source the scripts use today."""
+    def ensure_extra_repos(self):
+        """Enable distro repos needed for xrdp/xfce/etc.
+        No-op on Debian. On RHEL (not Fedora) this means EPEL + CRB, which is
+        where xrdp and the XFCE group live."""
         if self.is_debian:
+            return
+        if self.os_info.get("ID") == "fedora":
+            return  # xfce/xrdp are in Fedora's default repos
+        # Rocky/Alma/RHEL/CentOS Stream
+        self.run("dnf -y install epel-release", check=False)
+        # CodeReady Builder (named 'crb' on EL9+, 'powertools' on EL8) — some
+        # EPEL packages depend on it. Try both; ignore the one that doesn't exist.
+        self.run("dnf -y config-manager --set-enabled crb", check=False)
+        self.run("dnf -y config-manager --set-enabled powertools", check=False)
+        self.pkg_refresh()
+
+    # ── third-party repos ───────────────────────────────────────────────────
+    def install_chrome(self):
+        """Install Google Chrome.
+
+        Debian: direct .deb download (fast path) with a signed apt-repo
+        fallback — mirrors the original behaviour. RHEL: the official .rpm,
+        which also drops the google-chrome yum repo for future updates."""
+        if self.is_rhel:
+            self.run(
+                "dnf -y install "
+                "https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm"
+            )
+            return
+        try:
+            self.run("wget -q -O /tmp/google-chrome.deb "
+                     "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb")
+            self.pkg_install_local("/tmp/google-chrome.deb")
+            self.run("rm -f /tmp/google-chrome.deb", check=False)
+        except subprocess.CalledProcessError:
+            # Fallback: add the signed apt repo and install from it
+            self.run("wget -q -O /usr/share/keyrings/google-chrome.gpg "
+                     "https://dl.google.com/linux/linux_signing_key.pub")
             self.run(
                 "echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] "
                 "http://dl.google.com/linux/chrome/deb/ stable main' "
@@ -160,12 +193,6 @@ class Platform:
             )
             self.pkg_refresh()
             self.pkg_install("google-chrome-stable")
-        else:
-            # Google ships a yum repo; the rpm pulls it in, or drop a .repo file.
-            self.run(
-                "dnf -y install "
-                "https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm"
-            )
 
     def install_node(self, major="22"):
         """NodeSource publishes both deb and rpm setup scripts."""
