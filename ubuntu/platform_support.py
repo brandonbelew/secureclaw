@@ -207,7 +207,13 @@ class Platform:
 
     def add_tailscale_repo(self):
         """Tailscale publishes per-distro repo files. Debian keys off the
-        codename; RHEL uses a single el-version-agnostic .repo."""
+        codename; RHEL drops a .repo into /etc/yum.repos.d.
+
+        We curl the .repo file directly rather than using `dnf config-manager
+        --add-repo`, because dnf5 (Fedora 41+) renamed that to `addrepo
+        --from-repofile=` while dnf4 (EL8/9) still uses `--add-repo`. A plain
+        curl works on both. Note the Fedora repo path is NOT versioned, but the
+        RHEL/Rocky/Alma path IS keyed by major release."""
         if self.is_debian:
             codename = self._debian_codename()
             self.run(
@@ -219,13 +225,17 @@ class Platform:
                 "| tee /etc/apt/sources.list.d/tailscale.list >/dev/null"
             )
             self.pkg_refresh()
+        elif self.os_info.get("ID") == "fedora":
+            self.run(
+                "curl -fsSL https://pkgs.tailscale.com/stable/fedora/tailscale.repo "
+                "-o /etc/yum.repos.d/tailscale.repo"
+            )
         else:
-            # Works for Fedora and the RHEL/Rocky/Alma "el" family alike.
-            distro = "fedora" if (self.os_info.get("ID") == "fedora") else "rhel"
+            # RHEL / Rocky / AlmaLinux / CentOS Stream — versioned by major release
             ver = self.os_info.get("VERSION_ID", "").split(".")[0]
             self.run(
-                f"dnf -y config-manager --add-repo "
-                f"https://pkgs.tailscale.com/stable/{distro}/{ver}/tailscale.repo"
+                f"curl -fsSL https://pkgs.tailscale.com/stable/rhel/{ver}/tailscale.repo "
+                "-o /etc/yum.repos.d/tailscale.repo"
             )
         self.pkg_install("tailscale")
 
