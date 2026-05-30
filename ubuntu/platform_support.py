@@ -66,9 +66,10 @@ PACKAGE_MAP = {
     "buildtools":    {"debian": "build-essential g++",        "rhel": "gcc gcc-c++ make"},
     "gnupg":         {"debian": "gnupg2",                     "rhel": "gnupg2"},
     "apt_extras":    {"debian": "software-properties-common", "rhel": ""},  # no RHEL equiv
-    # RHEL: the dnf *environment* group id is @xfce-desktop-environment. dnf5
-    # (Fedora 41+) does not resolve the bare @xfce alias that dnf4 accepted.
-    "xfce":          {"debian": "xfce4 xfce4-goodies",        "rhel": "@xfce-desktop-environment"},
+    # RHEL xfce group id differs by distro and is resolved dynamically in
+    # packages(): Fedora uses the environment group @xfce-desktop-environment,
+    # while EL/EPEL (Rocky/Alma/RHEL 9) only ship the group @xfce-desktop.
+    "xfce":          {"debian": "xfce4 xfce4-goodies",        "rhel": "@xfce-desktop"},
     "openssh_server":{"debian": "openssh-server",             "rhel": "openssh-server"},
     # Debian's xrdp pulls in xorgxrdp automatically; Fedora/RHEL does NOT, and
     # without it an RDP session connects to a black screen.
@@ -109,6 +110,11 @@ class Platform:
         out = []
         for name in logical_names:
             mapped = PACKAGE_MAP.get(name, {}).get(self.family, name)
+            # The XFCE desktop group id differs across the RHEL family: Fedora
+            # ships it as an environment group, EL/EPEL as a plain group.
+            if name == "xfce" and self.is_rhel:
+                mapped = ("@xfce-desktop-environment"
+                          if self.os_info.get("ID") == "fedora" else "@xfce-desktop")
             if mapped:
                 out.extend(mapped.split())
         return out
@@ -162,8 +168,10 @@ class Platform:
             return
         if self.os_info.get("ID") == "fedora":
             return  # xfce/xrdp are in Fedora's default repos
-        # Rocky/Alma/RHEL/CentOS Stream
-        self.run("dnf -y install epel-release", check=False)
+        # Rocky/Alma/RHEL/CentOS Stream. dnf-plugins-core provides
+        # `config-manager`, which is NOT on a minimal install but is needed to
+        # enable CRB below; install it alongside epel-release.
+        self.run("dnf -y install epel-release dnf-plugins-core", check=False)
         # CodeReady Builder (named 'crb' on EL9+, 'powertools' on EL8) — some
         # EPEL packages depend on it. Try both; ignore the one that doesn't exist.
         self.run("dnf -y config-manager --set-enabled crb", check=False)
