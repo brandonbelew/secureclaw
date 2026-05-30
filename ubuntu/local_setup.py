@@ -368,7 +368,7 @@ polkit.addRule(function(action, subject) {
             )
             if choice == 0:
                 self.install_user = user
-                self.run_command(f"usermod -aG sudo {user}", check=False)
+                self.run_command(f"usermod -aG {self.plat.admin_group} {user}", check=False)
                 self._write_xsession(user)
                 self._save_state(user_selected=True, install_user=user)
                 self.log(f"Using existing user: {user}", "SUCCESS")

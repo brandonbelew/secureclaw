@@ -547,7 +547,7 @@ class UniversalVPSSetup:
                 )
                 if choice == 0:
                     self.rdp_username = username
-                    self.run_command(f"usermod -aG sudo {username}", check=False)
+                    self.run_command(f"usermod -aG {self.plat.admin_group} {username}", check=False)
                     self.log(f"Using existing user: {username} (ensured sudo membership)", "SUCCESS")
                     self._save_state(rdp_user_created=True, rdp_username=username)
                     return
