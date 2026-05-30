@@ -201,14 +201,18 @@ class Platform:
             self.pkg_install("google-chrome-stable")
 
     def install_node(self, major="22"):
-        """NodeSource publishes both deb and rpm setup scripts."""
+        """NodeSource publishes both deb and rpm setup scripts.
+
+        Also installs the build toolchain + git, which OpenClaw's installer and
+        Homebrew both need. git ships on most Debian images but NOT on Fedora
+        Server, so it must be installed explicitly."""
         if self.is_debian:
             self.run(f"curl -fsSL https://deb.nodesource.com/setup_{major}.x | bash -")
             self.pkg_install("nodejs")
         else:
             self.run(f"curl -fsSL https://rpm.nodesource.com/setup_{major}.x | bash -")
             self.pkg_install("nodejs")
-        self.pkg_install("buildtools", "cmake", "python3", logical=True)
+        self.pkg_install("buildtools", "cmake", "python3", "git", logical=True)
 
     def add_tailscale_repo(self):
         """Tailscale publishes per-distro repo files. Debian keys off the
