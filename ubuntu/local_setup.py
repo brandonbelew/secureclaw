@@ -232,7 +232,7 @@ class LocalUbuntuSetup:
         if not self.plat.pkg_installed("xrdp"):
             self.log("Installing xrdp...")
             self.plat.ensure_extra_repos()
-            self.plat.pkg_install("xrdp")
+            self.plat.pkg_install("xrdp", logical=True)
 
         # Needed to avoid TLS certificate errors in xrdp sessions
         self.run_command("adduser xrdp ssl-cert", check=False)

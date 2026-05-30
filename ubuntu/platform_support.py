@@ -70,6 +70,9 @@ PACKAGE_MAP = {
     # (Fedora 41+) does not resolve the bare @xfce alias that dnf4 accepted.
     "xfce":          {"debian": "xfce4 xfce4-goodies",        "rhel": "@xfce-desktop-environment"},
     "openssh_server":{"debian": "openssh-server",             "rhel": "openssh-server"},
+    # Debian's xrdp pulls in xorgxrdp automatically; Fedora/RHEL does NOT, and
+    # without it an RDP session connects to a black screen.
+    "xrdp":          {"debian": "xrdp",                       "rhel": "xrdp xorgxrdp"},
 }
 
 

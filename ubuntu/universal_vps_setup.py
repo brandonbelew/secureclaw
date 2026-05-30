@@ -496,7 +496,7 @@ class UniversalVPSSetup:
             if not self.plat.pkg_installed("xrdp"):
                 self.log("xrdp not found on existing desktop — installing xrdp only...", "WARNING")
                 self.plat.ensure_extra_repos()
-                self.plat.pkg_install("xrdp")
+                self.plat.pkg_install("xrdp", logical=True)
                 self.service_command("enable", "xrdp")
 
         self.desktop_type = detected
@@ -683,21 +683,31 @@ class UniversalVPSSetup:
             if self.gui_available:
                 self.show_gui_progress("Installing xrdp", "Setting up remote desktop server...")
             self.plat.ensure_extra_repos()
-            self.plat.pkg_install("xrdp")
+            self.plat.pkg_install("xrdp", logical=True)
             needs_xrdp_restart = True
             changes_made.append("xrdp installed")
         else:
             self.log("xrdp is already installed", "SUCCESS")
+            # On RHEL, xrdp does not depend on xorgxrdp; without it the Xorg
+            # session black-screens. Ensure it's present even on pre-existing xrdp.
+            if self.plat.is_rhel and not self.plat.pkg_installed("xorgxrdp"):
+                self.log("Installing xorgxrdp (required for the Xorg session on RHEL)...")
+                self.plat.ensure_extra_repos()
+                self.plat.pkg_install("xorgxrdp")
+                needs_xrdp_restart = True
+                changes_made.append("xorgxrdp installed")
 
         xrdp_ini_path = "/etc/xrdp/xrdp.ini"
         try:
             with open(xrdp_ini_path, "r") as f:
                 xrdp_config = f.read()
 
-            if "[Xorg]" in xrdp_config and "libxup.so" in xrdp_config:
-                self.log("xrdp Xorg persistence module is already configured", "SUCCESS")
+            # Match an ACTIVE [Xorg] section — a plain substring test is fooled
+            # by Fedora's commented "#[Xorg]" template lines.
+            if re.search(r'^\[Xorg\]', xrdp_config, re.MULTILINE):
+                self.log("xrdp Xorg session is already configured", "SUCCESS")
             else:
-                self.log("Xorg persistence module missing from xrdp config, adding it...")
+                self.log("Active Xorg session missing from xrdp.ini, adding it...")
                 self.run_command(f"cp {xrdp_ini_path} {xrdp_ini_path}.backup")
                 xorg_block = """
 [Xorg]
@@ -712,10 +722,27 @@ code=20
                 with open(xrdp_ini_path, "a") as f:
                     f.write(xorg_block)
                 needs_xrdp_restart = True
-                changes_made.append("xrdp Xorg persistence module added")
+                changes_made.append("xrdp Xorg session added")
 
         except FileNotFoundError:
             self.log("xrdp.ini not found - xrdp may not have installed correctly", "ERROR")
+
+        # xrdp's Xorg session runs /etc/xrdp/startwm.sh to launch the desktop.
+        # Debian ships one; Fedora does not. Create a portable launcher that
+        # prefers the user's ~/.xsession and falls back to startxfce4.
+        startwm = "/etc/xrdp/startwm.sh"
+        if not Path(startwm).exists():
+            self.log("startwm.sh missing — creating it (Fedora ships none)...")
+            with open(startwm, "w") as f:
+                f.write(
+                    "#!/bin/sh\n"
+                    "if test -r /etc/profile; then . /etc/profile; fi\n"
+                    'if test -r "$HOME/.xsession"; then exec /bin/sh "$HOME/.xsession"; fi\n'
+                    "exec startxfce4\n"
+                )
+            os.chmod(startwm, 0o755)
+            needs_xrdp_restart = True
+            changes_made.append("startwm.sh created")
 
         self.log("Checking session idle/sleep/lock settings...")
         if self.desktop_type == "xfce":
