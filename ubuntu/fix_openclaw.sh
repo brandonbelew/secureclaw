@@ -71,8 +71,16 @@ ok "Stale processes cleared"
 # ── Step 3: Ensure Node.js is present (installer needs it, can't sudo without TTY) ──
 info "Ensuring Node.js is installed..."
 if ! command -v node &>/dev/null; then
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt-get install -y nodejs build-essential cmake make g++ python3
+    # NodeSource + build toolchain differ by distro family.
+    if command -v apt-get &>/dev/null; then
+        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+        apt-get install -y nodejs build-essential cmake make g++ python3
+    elif command -v dnf &>/dev/null; then
+        curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
+        dnf -y install nodejs gcc gcc-c++ make cmake python3
+    else
+        die "Unsupported system: need apt (Debian/Ubuntu) or dnf (Fedora/RHEL/Rocky)."
+    fi
     ok "Node.js installed"
 else
     ok "Node.js already present ($(node --version))"

@@ -36,22 +36,43 @@ echo "Using branch: $BRANCH"
 
 RAW_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
 
+# ── Detect package manager / distro family ─────────────────────────────────────
+if command -v apt-get &>/dev/null; then
+    PKG_FAMILY="debian"
+elif command -v dnf &>/dev/null; then
+    PKG_FAMILY="rhel"
+else
+    echo "Unsupported system: need apt (Debian/Ubuntu) or dnf (Fedora/RHEL/Rocky)." >&2
+    exit 1
+fi
+
 # ── Install GTK3 dependencies ──────────────────────────────────────────────────
 echo "[1/7] Installing dependencies..."
-apt-get install -y python3-gi gir1.2-gtk-3.0 wget >/dev/null
+if [[ "$PKG_FAMILY" == "rhel" ]]; then
+    dnf -y install python3-gobject gtk3 wget >/dev/null
+    ADMIN_GROUP="wheel"
+    FW_STATUS_CMD="/usr/bin/firewall-cmd --state"
+else
+    apt-get install -y python3-gi gir1.2-gtk-3.0 wget >/dev/null
+    ADMIN_GROUP="sudo"
+    FW_STATUS_CMD="/usr/sbin/ufw status"
+fi
 
-# ── Download widget script ─────────────────────────────────────────────────────
+# ── Download widget script + shared platform module ───────────────────────────
 echo "[2/7] Downloading openclaw-widget..."
+# platform_support.py must sit beside the widget — it imports it to choose the
+# firewall command (ufw vs firewall-cmd).
+wget -q -O /usr/local/bin/platform_support.py "${RAW_BASE}/ubuntu/platform_support.py" || true
 wget -q -O "$INSTALL_BIN" "${RAW_BASE}/ubuntu/openclaw_widget.py"
 chmod +x "$INSTALL_BIN"
 # Inject branch so widget can fetch manifest from the correct branch at runtime
 sed -i "s/^REPO_BRANCH_OVERRIDE = None.*$/REPO_BRANCH_OVERRIDE = \"${BRANCH}\"/" "$INSTALL_BIN"
 
-# ── Sudoers entry for UFW status ───────────────────────────────────────────────
+# ── Sudoers entry for firewall status ──────────────────────────────────────────
 echo "[3/7] Writing sudoers entry..."
-cat > "$SUDOERS_FILE" <<'EOF'
-# Allow sudo group members to check UFW status without a password (used by openclaw-widget)
-%sudo ALL=(ALL) NOPASSWD: /usr/sbin/ufw status
+cat > "$SUDOERS_FILE" <<EOF
+# Allow admins to check firewall status without a password (used by openclaw-widget)
+%${ADMIN_GROUP} ALL=(ALL) NOPASSWD: ${FW_STATUS_CMD}
 EOF
 chmod 440 "$SUDOERS_FILE"
 

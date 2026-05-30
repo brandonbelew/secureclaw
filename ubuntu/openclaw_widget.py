@@ -58,6 +58,25 @@ REPO_NAME = "secureclaw"
 DEFAULT_PORT = 18789
 REPO_BRANCH_OVERRIDE = None  # injected at install time by install_widget.sh
 
+
+def _is_rhel_family():
+    """True on Fedora/RHEL/Rocky/AlmaLinux. Used to pick the firewall command
+    (firewall-cmd vs ufw). Falls back to False (ufw) if detection fails."""
+    try:
+        from platform_support import detect_family  # co-located in /usr/local/bin
+        info = {}
+        with open("/etc/os-release") as f:
+            for line in f:
+                if "=" in line:
+                    k, _, v = line.strip().partition("=")
+                    info[k] = v.strip('"')
+        return detect_family(info) == "rhel"
+    except Exception:
+        return False
+
+
+IS_RHEL = _is_rhel_family()
+
 DARK_CSS = """
 window {
     background-color: #1a1c1e;
@@ -758,6 +777,16 @@ class OpenClawWidget(Gtk.Window):
             return ""
 
     def _check_firewall(self):
+        if IS_RHEL:
+            # firewall-cmd --state prints "running" (rc 0) or "not running"
+            # (rc != 0); the widget's sudoers grants this command passwordless.
+            stdout, stderr, rc = run_command("sudo -n firewall-cmd --state", timeout=8)
+            text = (stdout or "") + (stderr or "")
+            if "not running" in text:
+                return "red", "inactive"
+            if rc == 0 and "running" in text:
+                return "green", "active"
+            return "yellow", "unknown"
         stdout, stderr, rc = run_command("sudo -n ufw status", timeout=8)
         if rc != 0:
             return "yellow", "unknown"
