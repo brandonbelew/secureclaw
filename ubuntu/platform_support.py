@@ -228,6 +228,204 @@ class Platform:
             )
         self.pkg_install("tailscale")
 
+    # ── firewall status (for verification checks) ───────────────────────────
+    def firewall_active(self):
+        """True if the host firewall is up (ufw active / firewalld running)."""
+        if self.is_debian:
+            r = self.run("ufw status verbose", check=False)
+            return "Status: active" in (r.stdout or "")
+        r = self.run("systemctl is-active firewalld", check=False)
+        return (r.stdout or "").strip() == "active"
+
+    def firewall_rules_text(self):
+        """Human-readable dump of active firewall rules (for grepping subnets)."""
+        if self.is_debian:
+            return (self.run("ufw status verbose", check=False).stdout or "")
+        zones = (self.run("firewall-cmd --list-all-zones", check=False).stdout or "")
+        rich = (self.run("firewall-cmd --list-rich-rules", check=False).stdout or "")
+        return zones + "\n" + rich
+
+    def security_check_firewall_fragments(self):
+        """Return (fw_check, fw_fix) bash fragments for the security-check tool,
+        selected for the host firewall stack (ufw on Debian, firewalld on RHEL).
+
+        Contract honoured by both:
+          * read live firewall state into $fw_out
+          * set FIX_FW / FIX_FW6 / FIX_TS_RULE / FIX_SSH_RULE / FIX_RDP_RULE
+          * fw_fix applies any requested fixes and sets fw_changed=1 + reloads
+        """
+        if not self.is_rhel:
+            fw_check = r"""# ── Firewall ──────────────────────────────────────────────────────────────────
+section "Firewall (UFW)"
+fw_out=$(ufw status verbose 2>/dev/null)
+if echo "$fw_out" | grep -q "Status: active"; then
+    pass "UFW is active"
+else
+    fail "UFW is NOT active — server is unprotected!"; FIX_FW=1
+fi
+if grep -q "^IPV6=yes" /etc/default/ufw 2>/dev/null; then
+    pass "UFW IPv6 filtering is enabled"
+else
+    fail "UFW IPv6 filtering is disabled — IPv6 traffic may be unprotected!"; FIX_FW6=1
+fi
+if echo "$fw_out" | grep -q "tailscale0"; then
+    pass "Tailscale interface rules present"
+else
+    fail "Tailscale interface rules missing"; FIX_TS_RULE=1
+fi
+if echo "$fw_out" | grep -qE "100\.64\.0\.0/10.*22|22.*100\.64\.0\.0/10"; then
+    pass "SSH (22) restricted to Tailscale IPv4 subnet"
+else
+    fail "SSH (22) does not have a Tailscale IPv4 rule"; FIX_SSH_RULE=1
+fi
+if echo "$fw_out" | grep -qE "fd7a:115c:a1e0::/48.*22|22.*fd7a:115c:a1e0::/48"; then
+    pass "SSH (22) restricted to Tailscale IPv6 subnet"
+else
+    fail "SSH (22) does not have a Tailscale IPv6 rule"; FIX_SSH_RULE=1
+fi
+if echo "$fw_out" | grep -qE "100\.64\.0\.0/10.*3389|3389.*100\.64\.0\.0/10"; then
+    pass "RDP (3389) restricted to Tailscale IPv4 subnet"
+else
+    fail "RDP (3389) does not have a Tailscale IPv4 rule"; FIX_RDP_RULE=1
+fi
+if echo "$fw_out" | grep -qE "fd7a:115c:a1e0::/48.*3389|3389.*fd7a:115c:a1e0::/48"; then
+    pass "RDP (3389) restricted to Tailscale IPv6 subnet"
+else
+    fail "RDP (3389) does not have a Tailscale IPv6 rule"; FIX_RDP_RULE=1
+fi"""
+
+            fw_fix = r"""        if [ "$FIX_FW" -eq 1 ]; then
+            echo -e "  → Enabling UFW..."
+            ufw --force enable && fix_ok "UFW enabled" || fix_err "Failed to enable UFW"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_FW6" -eq 1 ]; then
+            echo -e "  → Enabling UFW IPv6 filtering..."
+            sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw
+            grep -q '^IPV6=' /etc/default/ufw || echo 'IPV6=yes' >> /etc/default/ufw
+            fix_ok "UFW IPv6 filtering enabled"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_TS_RULE" -eq 1 ]; then
+            echo -e "  → Adding Tailscale interface rules..."
+            ufw allow in on tailscale0 && \
+            ufw allow out on tailscale0 && \
+            fix_ok "Tailscale interface rules added" || fix_err "Failed to add Tailscale rules"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_SSH_RULE" -eq 1 ]; then
+            echo -e "  → Restricting SSH to Tailscale subnets (IPv4 + IPv6)..."
+            ufw delete allow 22/tcp  2>/dev/null || true
+            ufw delete allow 22      2>/dev/null || true
+            ufw delete allow OpenSSH 2>/dev/null || true
+            ufw allow from 100.64.0.0/10       to any port 22 proto tcp && \
+            ufw allow from fd7a:115c:a1e0::/48 to any port 22 proto tcp && \
+                fix_ok "SSH restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict SSH"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_RDP_RULE" -eq 1 ]; then
+            echo -e "  → Restricting RDP to Tailscale subnets (IPv4 + IPv6)..."
+            ufw delete allow 3389/tcp 2>/dev/null || true
+            ufw delete allow 3389     2>/dev/null || true
+            ufw allow from 100.64.0.0/10       to any port 3389 proto tcp && \
+            ufw allow from fd7a:115c:a1e0::/48 to any port 3389 proto tcp && \
+                fix_ok "RDP restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict RDP"
+            fw_changed=1
+        fi
+
+        if [ "$fw_changed" -eq 1 ]; then
+            echo -e "  → Reloading UFW..."
+            ufw --force reload && fix_ok "UFW reloaded" || fix_err "UFW reload failed"
+        fi"""
+            return fw_check, fw_fix
+
+        # ── RHEL family: firewalld ──────────────────────────────────────────
+        # firewalld is zone-based: default zone 'drop' = deny incoming, the
+        # tailscale0 interface lives in the 'trusted' zone, and per-subnet
+        # access is expressed as rich rules. IPv6 is filtered natively, so
+        # there is no separate IPv6 toggle (FIX_FW6 stays 0).
+        fw_check = r"""# ── Firewall ──────────────────────────────────────────────────────────────────
+section "Firewall (firewalld)"
+if systemctl is-active --quiet firewalld; then
+    pass "firewalld is active"
+else
+    fail "firewalld is NOT active — server is unprotected!"; FIX_FW=1
+fi
+fw_out=$(firewall-cmd --list-all-zones 2>/dev/null)
+rich=$(firewall-cmd --list-rich-rules 2>/dev/null)
+if [ "$(firewall-cmd --get-default-zone 2>/dev/null)" = "drop" ]; then
+    pass "Default zone is 'drop' (incoming denied)"
+else
+    fail "Default zone is not 'drop' — incoming traffic may be allowed!"; FIX_FW=1
+fi
+pass "IPv6 filtering handled natively by firewalld"
+if firewall-cmd --zone=trusted --list-interfaces 2>/dev/null | grep -qw tailscale0; then
+    pass "Tailscale interface is in the trusted zone"
+else
+    fail "Tailscale interface not in trusted zone"; FIX_TS_RULE=1
+fi
+if echo "$rich" | grep 'family="ipv4"' | grep '100.64.0.0/10' | grep -q 'port="22"'; then
+    pass "SSH (22) restricted to Tailscale IPv4 subnet"
+else
+    fail "SSH (22) does not have a Tailscale IPv4 rule"; FIX_SSH_RULE=1
+fi
+if echo "$rich" | grep 'family="ipv6"' | grep 'fd7a:115c:a1e0::/48' | grep -q 'port="22"'; then
+    pass "SSH (22) restricted to Tailscale IPv6 subnet"
+else
+    fail "SSH (22) does not have a Tailscale IPv6 rule"; FIX_SSH_RULE=1
+fi
+if echo "$rich" | grep 'family="ipv4"' | grep '100.64.0.0/10' | grep -q 'port="3389"'; then
+    pass "RDP (3389) restricted to Tailscale IPv4 subnet"
+else
+    fail "RDP (3389) does not have a Tailscale IPv4 rule"; FIX_RDP_RULE=1
+fi
+if echo "$rich" | grep 'family="ipv6"' | grep 'fd7a:115c:a1e0::/48' | grep -q 'port="3389"'; then
+    pass "RDP (3389) restricted to Tailscale IPv6 subnet"
+else
+    fail "RDP (3389) does not have a Tailscale IPv6 rule"; FIX_RDP_RULE=1
+fi"""
+
+        fw_fix = r"""        if [ "$FIX_FW" -eq 1 ]; then
+            echo -e "  → Enabling firewalld and setting default zone to drop..."
+            systemctl enable --now firewalld && \
+            firewall-cmd --set-default-zone=drop && \
+                fix_ok "firewalld enabled, default zone = drop" || fix_err "Failed to enable firewalld"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_TS_RULE" -eq 1 ]; then
+            echo -e "  → Adding Tailscale interface to trusted zone..."
+            firewall-cmd --permanent --zone=trusted --add-interface=tailscale0 && \
+                fix_ok "Tailscale interface trusted" || fix_err "Failed to trust tailscale0"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_SSH_RULE" -eq 1 ]; then
+            echo -e "  → Restricting SSH to Tailscale subnets (IPv4 + IPv6)..."
+            firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=100.64.0.0/10 port port=22 protocol=tcp accept' && \
+            firewall-cmd --permanent --add-rich-rule='rule family=ipv6 source address=fd7a:115c:a1e0::/48 port port=22 protocol=tcp accept' && \
+                fix_ok "SSH restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict SSH"
+            fw_changed=1
+        fi
+
+        if [ "$FIX_RDP_RULE" -eq 1 ]; then
+            echo -e "  → Restricting RDP to Tailscale subnets (IPv4 + IPv6)..."
+            firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=100.64.0.0/10 port port=3389 protocol=tcp accept' && \
+            firewall-cmd --permanent --add-rich-rule='rule family=ipv6 source address=fd7a:115c:a1e0::/48 port port=3389 protocol=tcp accept' && \
+                fix_ok "RDP restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict RDP"
+            fw_changed=1
+        fi
+
+        if [ "$fw_changed" -eq 1 ]; then
+            echo -e "  → Reloading firewalld..."
+            firewall-cmd --reload && fix_ok "firewalld reloaded" || fix_err "firewalld reload failed"
+        fi"""
+        return fw_check, fw_fix
+
     def _debian_codename(self):
         """VERSION_CODENAME from os-release, falling back to lsb_release."""
         cn = self.os_info.get("VERSION_CODENAME")
