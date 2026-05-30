@@ -10,17 +10,18 @@ RHEL-family systems (Fedora, Rocky, AlmaLinux, CentOS Stream) too.
 
 Design notes
 ------------
-* This is a SKETCH / skeleton. The mappings are real but a few of them (notably
-  firewalld rich rules and Chrome/Tailscale repos) want a hardening pass and a
-  test run on an actual Rocky/Fedora box before shipping.
+* Wired into install.sh + all three setup scripts + the widget. NOT yet
+  validated on a real Rocky/Fedora box — a few mappings (firewalld rich rules,
+  the Chrome/Tailscale RHEL repos, EPEL/CRB enablement) are written from docs
+  and want a test pass before shipping.
 * It deliberately does NOT import anything from the setup scripts. You inject the
   caller's `run_command(cmd, check=..., ...)` so logging/error handling stays in
   one place. `run_command` is expected to return an object with `.stdout` /
   `.returncode` (i.e. the same `subprocess.CompletedProcess` the scripts use).
-* DISTRIBUTION: the bootstrap (install.sh + the vps-setup/local-setup shortcuts)
-  currently curls each .py individually. This file must be added to those fetch
-  lists, or imported code will be missing at runtime. See the bottom of this
-  file for the exact spots.
+* DISTRIBUTION: the bootstrap curls each .py individually; this file is fetched
+  alongside them in install.sh (install_scripts() + the three shortcut heredocs)
+  and by install_widget.sh, so a sibling `import platform_support` resolves from
+  /usr/local/bin at runtime.
 """
 
 import subprocess
