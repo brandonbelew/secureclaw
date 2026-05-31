@@ -538,7 +538,10 @@ polkit.addRule(function(action, subject) {
                 self.log(f"Failed to set password: {cp.stderr}", "WARNING")
 
         self.log("Configuring GNOME Remote Desktop (RDP)...")
-        self.plat.setup_gnome_remote_desktop(self.install_user, self.rdp_password)
+        # Don't restart GDM here — a local install may be running from inside
+        # the user's own GNOME session, and restarting it would log them out.
+        self.plat.setup_gnome_remote_desktop(
+            self.install_user, self.rdp_password, restart_display_manager=False)
         self.log("GNOME Remote Desktop configured and started", "SUCCESS")
         self._save_state(xrdp_configured=True)
 
