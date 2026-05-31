@@ -405,10 +405,10 @@ fi
 section "RDP (port 3389)"
 rdp_listen=$(ss -tlnp 2>/dev/null | grep ':3389 ')
 if [ -n "$rdp_listen" ]; then
-    pass "XRDP is listening on port 3389"
+    pass "RDP server is listening on port 3389"
     info "Protected by firewall — only reachable via Tailscale (100.64.0.0/10)"
 else
-    warn "XRDP does not appear to be listening on 3389"
+    warn "RDP server does not appear to be listening on 3389"
 fi
 
 # ── OpenClaw ──────────────────────────────────────────────────────────────────
@@ -433,7 +433,7 @@ fi
 
 # ── Services ──────────────────────────────────────────────────────────────────
 section "Services"
-for svc in xrdp tailscaled chrome-cleanup.timer; do
+for svc in @@RDP_SVC@@ tailscaled chrome-cleanup.timer; do
     if systemctl is-active --quiet "$svc"; then
         pass "$svc is running"
     else
@@ -495,6 +495,10 @@ fi
 read -rp "  Press Enter to close..."
 """
 
+        # Point the service check at the active RDP backend (xrdp or
+        # gnome-remote-desktop).
+        script = script.replace("@@RDP_SVC@@", self.plat.rdp_service)
+
         with open("/usr/local/bin/security-check", "w") as f:
             f.write(script)
         os.chmod("/usr/local/bin/security-check", 0o755)
@@ -507,7 +511,7 @@ Version=1.0
 Type=Application
 Name=Security Check
 Comment=Verify firewall and security settings
-Exec=xfce4-terminal --title="SecureClaw Security Check" -e /usr/local/bin/security-check
+Exec=/usr/local/bin/security-check
 Icon=security-high
 Terminal=false
 Categories=System;Security;

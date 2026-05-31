@@ -25,6 +25,7 @@ Design notes
 """
 
 import subprocess
+import shlex
 
 
 # ── Family detection ───────────────────────────────────────────────────────────
@@ -168,6 +169,89 @@ class Platform:
         else:
             r = self.run(f"rpm -q {pkg} >/dev/null 2>&1", check=False)
         return r.returncode == 0
+
+    # ── remote-desktop backend selection (xrdp vs gnome-remote-desktop) ──────
+    @property
+    def remote_desktop_backend(self):
+        """Which RDP backend this OS uses:
+          'xrdp' — Debian/Ubuntu, EL8/EL9, Fedora (xrdp + XFCE)
+          'grd'  — EL10 (RHEL/Rocky/Alma 10): xrdp is gone with X.Org, so use
+                   gnome-remote-desktop + GNOME (Wayland)
+          None   — neither available
+        Call AFTER ensure_extra_repos() (EL9 needs EPEL for the xrdp check)."""
+        if self.is_debian:
+            return "xrdp"
+        if self.rdp_stack_available():
+            return "xrdp"
+        r = self.run(
+            "dnf -q list --available gnome-remote-desktop >/dev/null 2>&1 "
+            "|| rpm -q gnome-remote-desktop >/dev/null 2>&1", check=False)
+        return "grd" if r.returncode == 0 else None
+
+    @property
+    def rdp_service(self):
+        """systemd service name of the active RDP backend (for status checks)."""
+        return "gnome-remote-desktop" if self.remote_desktop_backend == "grd" else "xrdp"
+
+    def install_gnome_desktop(self):
+        """Install a GNOME (Wayland) session + gnome-remote-desktop — the EL10
+        remote-desktop stack. 'Server with GUI' is GNOME's server group, in the
+        base AppStream (no EPEL needed)."""
+        self.run('dnf -y group install "Server with GUI"', capture_output=False)
+        self.pkg_install("gnome-remote-desktop")
+
+    def setup_gnome_remote_desktop(self, username, password):
+        """Configure GNOME Remote Desktop in --system (remote-login) mode and
+        start it. Validated on Rocky 10 / GNOME 49.
+
+        --system stores credentials in a root-only system keyfile, which is the
+        only headless-safe option: the per-user modes store them in the GNOME
+        login keyring, which can't be unlocked without an interactive login.
+        Access is a credential-gated RDP connection followed by the normal GDM
+        login (defense in depth over the Tailscale-only firewall)."""
+        cert = "/etc/gnome-remote-desktop/tls.crt"
+        key = "/etc/gnome-remote-desktop/tls.key"
+
+        # GDM + a graphical target are needed for the remote-login greeter.
+        self.run("systemctl set-default graphical.target", check=False)
+        self.run("systemctl enable gdm", check=False)
+
+        # Self-signed TLS cert for the RDP server.
+        self.run("install -d -m 755 /etc/gnome-remote-desktop", check=False)
+        self.run(
+            "openssl req -x509 -newkey rsa:4096 -days 3650 -nodes "
+            f"-keyout {key} -out {cert} -subj '/CN=secureclaw'"
+        )
+        # CRITICAL: the system daemon runs as user 'gnome-remote-desktop' and
+        # must be able to read the key, or it reports the cert "not configured".
+        self.run(f"chgrp gnome-remote-desktop {cert} {key}", check=False)
+        self.run(f"chmod 640 {key}")
+
+        # Configure + enable the system RDP backend.
+        self.run(f"grdctl --system rdp set-tls-cert {cert}")
+        self.run(f"grdctl --system rdp set-tls-key {key}")
+        self.run("grdctl --system rdp set-port 3389", check=False)
+        self.run("grdctl --system rdp set-credentials "
+                 f"{shlex.quote(username)} {shlex.quote(password)}")
+        self.run("grdctl --system rdp enable")
+        self.run("systemctl enable --now gnome-remote-desktop.service")
+
+        self._suppress_gnome_initial_setup(username)
+
+    def _suppress_gnome_initial_setup(self, username):
+        """Skip the GNOME first-login wizard on a provisioned server."""
+        self.run("install -d /etc/gnome-initial-setup", check=False)
+        self.run(
+            "printf '[General]\\nexisting_user_can_skip=true\\n"
+            "vendor_user_setup=skip\\n' > /etc/gnome-initial-setup/vendor.conf",
+            check=False)
+        # mark done for future users (skel) and the user we just created
+        self.run("install -d /etc/skel/.config", check=False)
+        self.run("echo yes > /etc/skel/.config/gnome-initial-setup-done", check=False)
+        cfg = f"/home/{username}/.config"
+        self.run(f"install -d -o {username} -g {username} {cfg}", check=False)
+        self.run(f"echo yes > {cfg}/gnome-initial-setup-done", check=False)
+        self.run(f"chown {username}:{username} {cfg}/gnome-initial-setup-done", check=False)
 
     def rdp_stack_available(self):
         """True if the xrdp remote-desktop stack is installable from the

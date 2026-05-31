@@ -65,6 +65,8 @@ class UniversalVPSSetup:
         self.desktop_type = state.get("desktop_type")
         self.rdp_username = state.get("rdp_username")
         self.tailscale_ip = state.get("tailscale_ip")
+        self.rdp_backend = state.get("rdp_backend")  # 'xrdp' or 'grd'
+        self.rdp_password = None  # set during create_rdp_user (for grd creds)
 
     # ── State management ──────────────────────────────────────────────────────
 
@@ -460,37 +462,48 @@ class UniversalVPSSetup:
         self.log("System update completed", "SUCCESS")
         self._save_state(system_updated=True)
 
-    def _abort_if_no_rdp_stack(self):
-        """Stop with clear guidance if xrdp isn't packaged for this distro
-        (e.g. RHEL/Rocky/Alma 10 — EPEL 10 hasn't shipped xrdp/XFCE yet),
-        instead of failing later with a confusing dnf 'Nothing to do' error."""
-        if self.plat.rdp_stack_available():
-            return
+    def _abort_no_rdp_backend(self):
+        """Stop with clear guidance when neither xrdp nor gnome-remote-desktop
+        is available for this OS."""
         name = self.os_info.get("PRETTY_NAME", "this system")
-        self.log("xrdp is not available on this distribution.", "ERROR")
-        print(f"\n{Colors.FAIL}{Colors.BOLD}  xrdp-based remote desktop is not available on {name}.{Colors.ENDC}")
-        print(f"{Colors.WARNING}  EL10 (RHEL/Rocky/Alma 10) removed the X.Org server — only Wayland{Colors.ENDC}")
-        print(f"{Colors.WARNING}  remains. xrdp's backend (xorgxrdp) is an Xorg module, and XFCE has{Colors.ENDC}")
-        print(f"{Colors.WARNING}  no Wayland port, so neither is packaged. This is permanent, not a delay.{Colors.ENDC}")
-        print()
-        print(f"  EL10's native remote desktop is {Colors.BOLD}gnome-remote-desktop{Colors.ENDC} (grdctl),")
-        print(f"  which SecureClaw does not configure yet.")
-        print()
-        print(f"  For SecureClaw's current xrdp setup, use one of:")
-        print(f"      • Rocky Linux / AlmaLinux 9   (EL9 — fully supported)")
-        print(f"      • Fedora")
-        print(f"      • Ubuntu / Debian")
+        self.log("No supported remote-desktop backend is available.", "ERROR")
+        print(f"\n{Colors.FAIL}{Colors.BOLD}  No remote-desktop backend is available on {name}.{Colors.ENDC}")
+        print(f"{Colors.WARNING}  Neither xrdp nor gnome-remote-desktop could be found in the{Colors.ENDC}")
+        print(f"{Colors.WARNING}  configured repositories. SecureClaw supports:{Colors.ENDC}")
+        print(f"      • Ubuntu / Debian, Fedora, RHEL/Rocky/Alma 8–9  (xrdp + XFCE)")
+        print(f"      • RHEL/Rocky/Alma 10                            (gnome-remote-desktop)")
         print()
         sys.exit(1)
 
     def detect_and_setup_desktop(self):
-        """Detect installed desktop environment and install one if absent"""
+        """Detect/install the desktop + RDP backend appropriate for this OS.
+
+        xrdp+XFCE on Debian/Fedora/EL8-9; gnome-remote-desktop+GNOME on EL10
+        (where X.Org — and therefore xrdp — was removed)."""
         if self._step_done("desktop_setup"):
             self.log(f"Desktop setup already completed ({self.desktop_type}) — skipping", "SUCCESS")
             return
 
         print(f"\n{Colors.HEADER}=== DESKTOP ENVIRONMENT DETECTION ==={Colors.ENDC}")
 
+        # Enable EPEL/CRB on RHEL first so the xrdp-availability check is accurate.
+        self.plat.ensure_extra_repos()
+        self.rdp_backend = self.plat.remote_desktop_backend
+        self._save_state(rdp_backend=self.rdp_backend)
+
+        if self.rdp_backend is None:
+            self._abort_no_rdp_backend()
+
+        if self.rdp_backend == "grd":
+            # EL10: xrdp is gone with X.Org — use GNOME + gnome-remote-desktop.
+            self.log("xrdp unavailable on this OS — using GNOME Remote Desktop", "WARNING")
+            self.plat.install_gnome_desktop()
+            self.desktop_type = "gnome"
+            self.log("GNOME desktop + gnome-remote-desktop installed", "SUCCESS")
+            self._save_state(desktop_setup=True, desktop_type="gnome")
+            return
+
+        # ── xrdp backend (Debian, Fedora, EL8/EL9) ──────────────────────────
         if self.plat.pkg_installed("xfce4-session"):
             detected = "xfce"
         elif self.plat.pkg_installed("gnome-shell") or \
@@ -501,9 +514,6 @@ class UniversalVPSSetup:
 
         if detected == "none":
             self.log("No desktop environment found — installing XFCE + LightDM + xrdp...", "WARNING")
-            # xrdp lives in EPEL on RHEL family; ensure_extra_repos() enables it.
-            self.plat.ensure_extra_repos()
-            self._abort_if_no_rdp_stack()
             self.plat.pkg_install("xfce", "lightdm", "xrdp", logical=True)
 
             Path("/etc/lightdm").mkdir(parents=True, exist_ok=True)
@@ -519,8 +529,6 @@ class UniversalVPSSetup:
 
             if not self.plat.pkg_installed("xrdp"):
                 self.log("xrdp not found on existing desktop — installing xrdp only...", "WARNING")
-                self.plat.ensure_extra_repos()
-                self._abort_if_no_rdp_stack()
                 self.plat.pkg_install("xrdp", logical=True)
                 self.service_command("enable", "xrdp")
 
@@ -646,6 +654,10 @@ class UniversalVPSSetup:
         else:
             password = generated_password
 
+        # Stash the password — the GNOME Remote Desktop backend needs it to set
+        # the RDP gate credentials (grdctl set-credentials).
+        self.rdp_password = password
+
         admin = self.plat.admin_group  # 'sudo' on Debian, 'wheel' on RHEL
         try:
             self.run_command(f"useradd -m -s /bin/bash -G {admin},audio,video,input {username}")
@@ -663,11 +675,14 @@ class UniversalVPSSetup:
             self.log(f"Failed to set password: {cp_result.stderr}", "ERROR")
             raise subprocess.CalledProcessError(cp_result.returncode, 'chpasswd')
 
-        xsession_path = f"/home/{username}/.xsession"
-        with open(xsession_path, "w") as f:
-            f.write("#!/bin/bash\nexec xfce4-session\n")
-        self.run_command(f"chown {username}:{username} {xsession_path}")
-        self.run_command(f"chmod 755 {xsession_path}")
+        # The .xsession launcher is for the xrdp/XFCE backend; the GNOME Remote
+        # Desktop backend uses the GDM-managed GNOME session instead.
+        if getattr(self, "rdp_backend", "xrdp") == "xrdp":
+            xsession_path = f"/home/{username}/.xsession"
+            with open(xsession_path, "w") as f:
+                f.write("#!/bin/bash\nexec xfce4-session\n")
+            self.run_command(f"chown {username}:{username} {xsession_path}")
+            self.run_command(f"chmod 755 {xsession_path}")
 
         print(f"{Colors.WARNING}{Colors.BOLD}  Make sure you have saved your username and password!{Colors.ENDC}")
         input(f"{Colors.CYAN}  Press Enter once you have saved your credentials to continue...{Colors.ENDC}")
@@ -693,9 +708,18 @@ class UniversalVPSSetup:
         self._save_state(rdp_user_created=True, rdp_username=username)
 
     def configure_rdp_persistence(self):
-        """Ensure xrdp is installed and configured for session persistence."""
+        """Configure the RDP backend's session (xrdp persistence, or GNOME
+        Remote Desktop on EL10)."""
         if self._step_done("rdp_configured"):
             self.log("RDP persistence already configured — skipping", "SUCCESS")
+            return
+
+        if getattr(self, "rdp_backend", "xrdp") == "grd":
+            print(f"\n{Colors.HEADER}=== GNOME REMOTE DESKTOP ==={Colors.ENDC}")
+            self.log("Configuring GNOME Remote Desktop (RDP)...")
+            self.plat.setup_gnome_remote_desktop(self.rdp_username, self.rdp_password)
+            self.log("GNOME Remote Desktop configured and started", "SUCCESS")
+            self._save_state(rdp_configured=True)
             return
 
         print(f"\n{Colors.HEADER}=== RDP SESSION PERSISTENCE ==={Colors.ENDC}")
@@ -1477,10 +1501,10 @@ fi
 section "RDP (port 3389)"
 rdp_listen=$(ss -tlnp 2>/dev/null | grep ':3389 ')
 if [ -n "$rdp_listen" ]; then
-    pass "XRDP is listening on port 3389"
+    pass "RDP server is listening on port 3389"
     info "Protected by firewall — only reachable via Tailscale (100.64.0.0/10)"
 else
-    warn "XRDP does not appear to be listening on 3389"
+    warn "RDP server does not appear to be listening on 3389"
 fi
 
 # ── OpenClaw ──────────────────────────────────────────────────────────────────
@@ -1505,7 +1529,7 @@ fi
 
 # ── Services ──────────────────────────────────────────────────────────────────
 section "Services"
-for svc in xrdp tailscaled chrome-cleanup.timer; do
+for svc in @@RDP_SVC@@ tailscaled chrome-cleanup.timer; do
     if systemctl is-active --quiet "$svc"; then
         pass "$svc is running"
     else
@@ -1567,6 +1591,10 @@ fi
 read -rp "  Press Enter to close..."
 """
 
+        # Point the service check at the active RDP backend (xrdp or
+        # gnome-remote-desktop).
+        script = script.replace("@@RDP_SVC@@", self.plat.rdp_service)
+
         with open("/usr/local/bin/security-check", "w") as f:
             f.write(script)
         os.chmod("/usr/local/bin/security-check", 0o755)
@@ -1578,9 +1606,9 @@ Version=1.0
 Type=Application
 Name=Security Check
 Comment=Verify firewall and security settings
-Exec=xfce4-terminal --title="SecureClaw Security Check" -e /usr/local/bin/security-check
+Exec=/usr/local/bin/security-check
 Icon=security-high
-Terminal=false
+Terminal=true
 Categories=System;Security;
 """
         for user_dir in _real_user_homes():
