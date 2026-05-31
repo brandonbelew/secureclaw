@@ -1239,8 +1239,11 @@ Categories=System;Security;
         except Exception:
             oc_status = "Unknown"
 
+        rdp_label = ("GNOME Remote Desktop" if self.rdp_backend == "grd"
+                     else "xrdp (remote desktop server)")
+
         report = f"""
-{Colors.GREEN}{Colors.BOLD}LOCAL UBUNTU SETUP COMPLETED!{Colors.ENDC}
+{Colors.GREEN}{Colors.BOLD}LOCAL DESKTOP SETUP COMPLETE!{Colors.ENDC}
 
 {Colors.CYAN}Summary:{Colors.ENDC}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1250,7 +1253,7 @@ Categories=System;Security;
 {Colors.BOLD}Tailscale IP:{Colors.ENDC}  {tailscale_ip}
 
 {Colors.BOLD}Installed:{Colors.ENDC}
-• xrdp (remote desktop server)
+• {rdp_label}
 • OpenClaw AI: {oc_status}
 • Google Chrome: {chrome_ver}
 

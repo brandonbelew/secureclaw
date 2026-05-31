@@ -805,7 +805,7 @@ WantedBy=timers.target
 • Firewall: {self.plat.firewall_name} active (Tailscale-only access)
 
 {Colors.BOLD}Installed Software:{Colors.ENDC}
-• RDP Server: XRDP with session persistence
+• RDP Server: {"GNOME Remote Desktop" if self.plat.remote_desktop_backend == "grd" else "xrdp with session persistence"}
 • OpenClaw: {openclaw_status}
 • Google Chrome: {chrome_version}
 
