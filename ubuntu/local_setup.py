@@ -68,6 +68,8 @@ class LocalUbuntuSetup:
         self.desktop_type = state.get("desktop_type")
         self.install_user = state.get("install_user")
         self.tailscale_ip = state.get("tailscale_ip")
+        self.rdp_backend  = state.get("rdp_backend")  # 'xrdp' or 'grd'
+        self.rdp_password = None  # captured during user selection (grd needs it)
 
     # ── State management ──────────────────────────────────────────────────────
 
@@ -194,6 +196,28 @@ class LocalUbuntuSetup:
 
         print(f"\n{Colors.HEADER}=== DESKTOP DETECTION ==={Colors.ENDC}")
 
+        # Pick the RDP backend (EPEL/CRB first so the xrdp check is accurate).
+        self.plat.ensure_extra_repos()
+        self.rdp_backend = self.plat.remote_desktop_backend
+        self._save_state(rdp_backend=self.rdp_backend)
+
+        if self.rdp_backend is None:
+            self.log("No remote-desktop backend (xrdp or gnome-remote-desktop) "
+                     "is available on this OS.", "ERROR")
+            sys.exit(1)
+
+        if self.rdp_backend == "grd":
+            # EL10: xrdp is gone with X.Org — use GNOME + gnome-remote-desktop.
+            self.log("xrdp unavailable on this OS — using GNOME Remote Desktop", "WARNING")
+            if not (self.plat.pkg_installed("gnome-shell") or self.plat.pkg_installed("gdm")):
+                self.plat.install_gnome_desktop()
+            else:
+                self.plat.pkg_install("gnome-remote-desktop")
+            self.desktop_type = "gnome"
+            self.log("GNOME desktop + gnome-remote-desktop ready", "SUCCESS")
+            self._save_state(desktop_detected=True, desktop_type="gnome")
+            return
+
         # GNOME (gdm3 on Debian, gdm on RHEL)
         if self.plat.pkg_installed("gnome-shell") or \
                 self.plat.pkg_installed("gdm3") or self.plat.pkg_installed("gdm"):
@@ -222,7 +246,11 @@ class LocalUbuntuSetup:
         self._save_state(desktop_detected=True, desktop_type="xfce")
 
     def setup_xrdp(self):
-        """Install xrdp and configure it for the detected desktop type."""
+        """Install xrdp and configure it for the detected desktop type.
+        For the GNOME Remote Desktop backend (EL10) this is a no-op — GRD is
+        configured in configure_grd() once the install user/password is known."""
+        if self.rdp_backend == "grd":
+            return
         if self._step_done("xrdp_configured"):
             self.log("xrdp already configured — skipping", "SUCCESS")
             return
@@ -446,11 +474,19 @@ polkit.addRule(function(action, subject) {
             raise subprocess.CalledProcessError(cp.returncode, 'chpasswd')
 
         self.install_user = username
+        self.rdp_password = password  # GNOME Remote Desktop needs it for grdctl
         self._write_xsession(username)
         self.log(f"User '{username}' created", "SUCCESS")
         self._save_state(user_selected=True, install_user=username)
 
     def _write_xsession(self, username):
+        # The .xsession launcher is an xrdp/XFCE concept; the GNOME Remote
+        # Desktop backend uses the GDM-managed GNOME session instead.
+        if self.rdp_backend == "grd":
+            return
+        return self._write_xsession_impl(username)
+
+    def _write_xsession_impl(self, username):
         """Write a desktop-appropriate .xsession for the user's xrdp sessions."""
         xsession_path = Path(f"/home/{username}/.xsession")
         if self.desktop_type == "gnome":
@@ -467,6 +503,44 @@ polkit.addRule(function(action, subject) {
         self.run_command(f"chown {username}:{username} {xsession_path}")
         self.run_command(f"chmod 755 {xsession_path}")
         self.log(f"Written .xsession ({self.desktop_type}) for {username}", "SUCCESS")
+
+    def configure_grd(self):
+        """Configure GNOME Remote Desktop (EL10). Runs after the install user is
+        chosen, because grdctl needs the RDP login password. No-op for xrdp."""
+        if self.rdp_backend != "grd":
+            return
+        if self._step_done("xrdp_configured"):
+            self.log("Remote desktop already configured — skipping", "SUCCESS")
+            return
+
+        print(f"\n{Colors.HEADER}=== GNOME REMOTE DESKTOP ==={Colors.ENDC}")
+
+        # A freshly-created user already has self.rdp_password. For an existing
+        # user we can't read it, so prompt — and set it, so the RDP credential
+        # gate and the GDM login use the same password.
+        if not self.rdp_password:
+            while True:
+                p1 = getpass.getpass(
+                    f"{Colors.CYAN}Set the RDP/login password for "
+                    f"{self.install_user}: {Colors.ENDC}")
+                if not p1:
+                    print(f"{Colors.WARNING}Password cannot be empty.{Colors.ENDC}")
+                    continue
+                if p1 != getpass.getpass(f"{Colors.CYAN}Confirm: {Colors.ENDC}"):
+                    print(f"{Colors.WARNING}Passwords do not match.{Colors.ENDC}")
+                    continue
+                self.rdp_password = p1
+                break
+            cp = subprocess.run(["chpasswd"],
+                                input=f"{self.install_user}:{self.rdp_password}",
+                                text=True, capture_output=True)
+            if cp.returncode != 0:
+                self.log(f"Failed to set password: {cp.stderr}", "WARNING")
+
+        self.log("Configuring GNOME Remote Desktop (RDP)...")
+        self.plat.setup_gnome_remote_desktop(self.install_user, self.rdp_password)
+        self.log("GNOME Remote Desktop configured and started", "SUCCESS")
+        self._save_state(xrdp_configured=True)
 
     # ── Tailscale ─────────────────────────────────────────────────────────────
 
@@ -858,10 +932,10 @@ fi
 section "RDP (port 3389)"
 rdp_listen=$(ss -tlnp 2>/dev/null | grep ':3389 ')
 if [ -n "$rdp_listen" ]; then
-    pass "XRDP is listening on port 3389"
+    pass "RDP server is listening on port 3389"
     info "Protected by firewall — only reachable via Tailscale (100.64.0.0/10)"
 else
-    warn "XRDP does not appear to be listening on 3389"
+    warn "RDP server does not appear to be listening on 3389"
 fi
 
 section "OpenClaw"
@@ -872,7 +946,7 @@ else
 fi
 
 section "Services"
-for svc in xrdp tailscaled chrome-cleanup.timer; do
+for svc in @@RDP_SVC@@ tailscaled chrome-cleanup.timer; do
     if systemctl is-active --quiet "$svc"; then
         pass "$svc is running"
     else
@@ -927,6 +1001,9 @@ fi
 
 read -rp "  Press Enter to close..."
 """
+        # Point the service check at the active RDP backend.
+        security_script = security_script.replace("@@RDP_SVC@@", self.plat.rdp_service)
+
         with open("/usr/local/bin/security-check", "w") as f:
             f.write(security_script)
         os.chmod("/usr/local/bin/security-check", 0o755)
@@ -1255,6 +1332,7 @@ Categories=System;Security;
             self.detect_and_record_desktop()
             self.setup_xrdp()
             self.select_install_user()
+            self.configure_grd()
             self.install_tailscale()
 
             if self.configure_tailscale():
