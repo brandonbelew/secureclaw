@@ -400,6 +400,10 @@ class Platform:
                 "-o /etc/yum.repos.d/tailscale.repo"
             )
         self.pkg_install("tailscale")
+        # The Debian package auto-starts tailscaled; the RPM does NOT, so
+        # `tailscale up` would fail with "tailscaled isn't running". Enable +
+        # start it explicitly (harmless/idempotent on Debian).
+        self.run("systemctl enable --now tailscaled", check=False)
 
     # ── firewall status (for verification checks) ───────────────────────────
     def firewall_active(self):
