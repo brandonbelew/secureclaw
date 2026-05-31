@@ -560,7 +560,7 @@ polkit.addRule(function(action, subject) {
 
     def lockdown_server(self):
         """
-        Apply UFW rules restricting SSH and RDP to Tailscale-only access.
+        Apply firewall rules restricting SSH and RDP to Tailscale-only access.
 
         Differs from the VPS lockdown in two ways:
           - No countdown / SSH-disconnect drama — you're sitting at the machine
@@ -574,7 +574,7 @@ polkit.addRule(function(action, subject) {
         print(f"\n{Colors.HEADER}=== FIREWALL LOCKDOWN ==={Colors.ENDC}")
 
         print(f"""
-{Colors.CYAN}This will configure UFW so that SSH (22) and RDP (3389) connections
+{Colors.CYAN}This will configure {self.plat.firewall_name} so that SSH (22) and RDP (3389) connections
 are only accepted from your Tailscale network. Direct internet access
 to those ports will be blocked.
 
@@ -844,9 +844,9 @@ ssh_listen=$(ss -tlnp 2>/dev/null | grep ':22 ')
 if [ -n "$ssh_listen" ]; then
     if echo "$ssh_listen" | grep -qE "0\.0\.0\.0:22|\*:22|:::22"; then
         if [ "$FIX_FW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
-            pass "SSH listening on all interfaces — restricted by UFW to Tailscale subnet only"
+            pass "SSH listening on all interfaces — restricted by the firewall to Tailscale subnet only"
         else
-            warn "SSH is listening on all interfaces and UFW rules need attention"
+            warn "SSH is listening on all interfaces and firewall rules need attention"
         fi
     else
         pass "SSH is bound to restricted interface only"

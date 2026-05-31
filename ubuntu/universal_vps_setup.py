@@ -295,7 +295,7 @@ class UniversalVPSSetup:
         print(f"  and participates in regular independent third-party security")
         print(f"  audits. Direct public internet access to SSH and RDP is blocked.")
         print()
-        print(f"  {Colors.BOLD}UFW Firewall{Colors.ENDC}")
+        print(f"  {Colors.BOLD}{self.plat.firewall_name} Firewall{Colors.ENDC}")
         print(f"  The firewall is configured to deny all inbound connections")
         print(f"  by default, with access permitted only from the Tailscale subnet")
         print(f"  (100.64.0.0/10). This eliminates direct internet exposure of")
@@ -308,7 +308,7 @@ class UniversalVPSSetup:
         print(f"     {Colors.DIM}tailscale.com → Settings → Two-factor authentication{Colors.ENDC}")
         print(f"  {Colors.BOLD}•{Colors.ENDC}  Periodically run the Security Check tool (desktop shortcut)")
         print(f"     {Colors.DIM}to verify firewall rules are still intact{Colors.ENDC}")
-        print(f"  {Colors.BOLD}•{Colors.ENDC}  Keep your server patched:  sudo apt upgrade")
+        print(f"  {Colors.BOLD}•{Colors.ENDC}  Keep your server patched:  {self.plat.upgrade_hint}")
         print(f"  {Colors.DIM}──────────────────────────────────────────────────────────────{Colors.ENDC}")
         print(f"\n  {Colors.WARNING}Note:{Colors.ENDC}  Have a Tailscale account ready before continuing.")
         print(f"        Create a free account at tailscale.com if you don't have one.")
@@ -1437,9 +1437,9 @@ ssh_listen=$(ss -tlnp 2>/dev/null | grep ':22 ')
 if [ -n "$ssh_listen" ]; then
     if echo "$ssh_listen" | grep -qE "0\.0\.0\.0:22|\*:22|:::22"; then
         if [ "$FIX_FW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
-            pass "SSH listening on all interfaces — access restricted by UFW to Tailscale subnet only"
+            pass "SSH listening on all interfaces — access restricted by the firewall to Tailscale subnet only"
         else
-            warn "SSH is listening on all interfaces and UFW rules need attention (see Firewall section)"
+            warn "SSH is listening on all interfaces and firewall rules need attention (see Firewall section)"
         fi
     else
         pass "SSH is bound to restricted interface only"
@@ -1466,9 +1466,9 @@ if systemctl is-active --quiet openclaw; then
     if [ -n "$oc_ports" ]; then
         for port in $oc_ports; do
             if echo "$fw_out" | grep -q "$port"; then
-                pass "OpenClaw port $port has an explicit UFW rule"
+                pass "OpenClaw port $port has an explicit firewall rule"
             else
-                info "OpenClaw port $port — covered by UFW default deny incoming"
+                info "OpenClaw port $port — covered by the firewall's default-deny"
             fi
         done
     else
@@ -1771,7 +1771,7 @@ WantedBy=timers.target
 
 {Colors.WARNING}Security Notes:{Colors.ENDC}
 • Server locked down to Tailscale network only
-• UFW firewall active with restrictive rules
+• {self.plat.firewall_name} firewall active with restrictive rules
 • All connections must use Tailscale VPN
 
 {Colors.FAIL}{Colors.BOLD}╔══════════════════════════════════════════════════════════════╗

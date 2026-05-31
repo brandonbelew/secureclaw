@@ -95,6 +95,17 @@ class Platform:
     def is_rhel(self):
         return self.family == "rhel"
 
+    # ── display helpers (for user-facing text) ──────────────────────────────
+    @property
+    def firewall_name(self):
+        """Human name of the firewall stack, for info/UI text."""
+        return "UFW" if self.is_debian else "firewalld"
+
+    @property
+    def upgrade_hint(self):
+        """The command to suggest for keeping the system patched."""
+        return "sudo apt upgrade" if self.is_debian else "sudo dnf upgrade"
+
     @property
     def admin_group(self):
         """Group that confers sudo: 'sudo' on Debian, 'wheel' on RHEL."""

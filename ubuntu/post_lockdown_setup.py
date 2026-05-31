@@ -390,9 +390,9 @@ ssh_listen=$(ss -tlnp 2>/dev/null | grep ':22 ')
 if [ -n "$ssh_listen" ]; then
     if echo "$ssh_listen" | grep -qE "0\.0\.0\.0:22|\*:22|:::22"; then
         if [ "$FIX_FW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
-            pass "SSH listening on all interfaces — access restricted by UFW to Tailscale subnet only"
+            pass "SSH listening on all interfaces — access restricted by the firewall to Tailscale subnet only"
         else
-            warn "SSH is listening on all interfaces and UFW rules need attention (see Firewall section)"
+            warn "SSH is listening on all interfaces and firewall rules need attention (see Firewall section)"
         fi
     else
         pass "SSH is bound to restricted interface only"
@@ -419,9 +419,9 @@ if systemctl is-active --quiet openclaw; then
     if [ -n "$oc_ports" ]; then
         for port in $oc_ports; do
             if echo "$fw_out" | grep -q "$port"; then
-                pass "OpenClaw port $port has an explicit UFW rule"
+                pass "OpenClaw port $port has an explicit firewall rule"
             else
-                info "OpenClaw port $port — covered by UFW default deny incoming"
+                info "OpenClaw port $port — covered by the firewall's default-deny"
             fi
         done
     else
@@ -798,7 +798,7 @@ WantedBy=timers.target
 • Tailscale IP: {tailscale_ip}
 • RDP Access: {tailscale_ip}:3389
 • SSH Access: ssh user@{tailscale_ip}
-• Firewall: UFW active (Tailscale-only access)
+• Firewall: {self.plat.firewall_name} active (Tailscale-only access)
 
 {Colors.BOLD}Installed Software:{Colors.ENDC}
 • RDP Server: XRDP with session persistence
@@ -811,7 +811,7 @@ WantedBy=timers.target
 • Accessible via RDP connection
 
 {Colors.WARNING}Security Notes:{Colors.ENDC}
-Your server is hardened using Tailscale VPN and UFW firewall rules that
+Your server is hardened using Tailscale VPN and {self.plat.firewall_name} firewall rules that
 restrict SSH and RDP to the Tailscale subnet only. Tailscale is SOC 2
 Type II certified, end-to-end encrypted, and independently audited.
 
