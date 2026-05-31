@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Universal Ubuntu VPS Setup Script
+Universal VPS Setup Script (Debian/Ubuntu + RHEL family)
 Handles both SSH and RDP initial access scenarios
 Configures RDP, Tailscale, security lockdown, and installs OpenClaw + Chrome
 Author: Brandon
@@ -228,7 +228,7 @@ class UniversalVPSSetup:
         """Display appropriate startup message based on access method"""
         print(f"{Colors.HEADER}{Colors.BOLD}")
         print("=" * 70)
-        print("        Universal Ubuntu VPS Interactive Setup")
+        print("        SecureClaw VPS Interactive Setup")
         print("=" * 70)
         print(f"{Colors.ENDC}")
 
@@ -259,7 +259,7 @@ class UniversalVPSSetup:
                     root.withdraw()
                     result = messagebox.askyesno(
                         "VPS Setup",
-                        "Welcome to Ubuntu VPS Setup!\n\n"
+                        "Welcome to SecureClaw VPS Setup!\n\n"
                         "Detected: You're connected via RDP\n\n"
                         "This script will:\n"
                         "• Enhance RDP with session persistence\n"
@@ -296,7 +296,7 @@ class UniversalVPSSetup:
         print(f"  audits. Direct public internet access to SSH and RDP is blocked.")
         print()
         print(f"  {Colors.BOLD}UFW Firewall{Colors.ENDC}")
-        print(f"  Ubuntu's firewall is configured to deny all inbound connections")
+        print(f"  The firewall is configured to deny all inbound connections")
         print(f"  by default, with access permitted only from the Tailscale subnet")
         print(f"  (100.64.0.0/10). This eliminates direct internet exposure of")
         print(f"  your remote access services.")
@@ -1801,7 +1801,7 @@ WantedBy=timers.target
                 root.withdraw()
                 messagebox.showinfo(
                     "Setup Complete!",
-                    f"Ubuntu VPS setup completed successfully!\n\n"
+                    f"VPS setup completed successfully!\n\n"
                     f"Tailscale IP: {tailscale_ip}\n"
                     f"RDP user: {rdp_user}\n"
                     f"OpenClaw: {openclaw_status}\n"

@@ -1,6 +1,6 @@
 #!/bin/bash
 # SecureClaw Setup Installer
-# Supports both VPS/remote-server installs and local Ubuntu desktop installs.
+# Supports both VPS/remote-server installs and local desktop installs.
 
 set -e
 
@@ -128,8 +128,8 @@ detect_mode() {
     echo
     echo -e "  ${CYAN}  1.${RESET}  ${BOLD}VPS / remote server${RESET}"
     echo -e "       ${DIM}SSH or cloud provider — fresh headless server${RESET}"
-    echo -e "  ${CYAN}  2.${RESET}  ${BOLD}Local Ubuntu desktop${RESET}"
-    echo -e "       ${DIM}Physically present at this machine — Ubuntu Desktop installed${RESET}"
+    echo -e "  ${CYAN}  2.${RESET}  ${BOLD}Local desktop${RESET}"
+    echo -e "       ${DIM}Physically present at this machine — desktop already installed${RESET}"
     echo
 
     if [[ "$SETUP_MODE" == "local" ]]; then

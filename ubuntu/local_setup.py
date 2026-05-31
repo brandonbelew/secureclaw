@@ -1212,7 +1212,7 @@ Categories=System;Security;
     def run_setup(self):
         print(f"{Colors.HEADER}{Colors.BOLD}")
         print("=" * 60)
-        print("    SecureClaw Local Ubuntu 24.04 Setup")
+        print("    SecureClaw Local Desktop Setup")
         print("=" * 60)
         print(f"{Colors.ENDC}")
 
