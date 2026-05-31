@@ -532,6 +532,12 @@ class UniversalVPSSetup:
                 self.plat.pkg_install("xrdp", logical=True)
                 self.service_command("enable", "xrdp")
 
+            # xrdp serves an XFCE session even on a GNOME box (GNOME 48+ is
+            # Wayland-only and aborts under xrdp). Ensure XFCE is available.
+            if not self.plat.pkg_installed("xfce4-session"):
+                self.log("Installing XFCE for the RDP session...", "WARNING")
+                self.plat.pkg_install("xfce", logical=True)
+
         self.desktop_type = detected
         self.log(f"Desktop type set to: {self.desktop_type}", "SUCCESS")
         self._save_state(desktop_setup=True, desktop_type=detected)
@@ -675,14 +681,22 @@ class UniversalVPSSetup:
             self.log(f"Failed to set password: {cp_result.stderr}", "ERROR")
             raise subprocess.CalledProcessError(cp_result.returncode, 'chpasswd')
 
-        # The .xsession launcher is for the xrdp/XFCE backend; the GNOME Remote
-        # Desktop backend uses the GDM-managed GNOME session instead.
+        # The .xsession launcher is for the xrdp backend; the GNOME Remote
+        # Desktop backend uses the GDM-managed GNOME session instead. xrdp
+        # always serves XFCE (GNOME 48+ is Wayland-only and can't run under it).
         if getattr(self, "rdp_backend", "xrdp") == "xrdp":
             xsession_path = f"/home/{username}/.xsession"
             with open(xsession_path, "w") as f:
-                f.write("#!/bin/bash\nexec xfce4-session\n")
+                f.write(
+                    "#!/bin/bash\n"
+                    "export XDG_SESSION_DESKTOP=xfce\n"
+                    "export XDG_CURRENT_DESKTOP=XFCE\n"
+                    "export DESKTOP_SESSION=xfce\n"
+                    "exec startxfce4\n"
+                )
             self.run_command(f"chown {username}:{username} {xsession_path}")
-            self.run_command(f"chmod 755 {xsession_path}")
+            self.run_command(f"chmod 700 {xsession_path}")
+            self.run_command(f"restorecon {xsession_path}", check=False)  # SELinux
 
         print(f"{Colors.WARNING}{Colors.BOLD}  Make sure you have saved your username and password!{Colors.ENDC}")
         input(f"{Colors.CYAN}  Press Enter once you have saved your credentials to continue...{Colors.ENDC}")
@@ -795,22 +809,25 @@ code=20
         except FileNotFoundError:
             self.log("xrdp.ini not found - xrdp may not have installed correctly", "ERROR")
 
-        # xrdp's Xorg session runs /etc/xrdp/startwm.sh to launch the desktop.
-        # Debian ships one; Fedora does not. Create a portable launcher that
-        # prefers the user's ~/.xsession and falls back to startxfce4.
-        startwm = "/etc/xrdp/startwm.sh"
-        if not Path(startwm).exists():
-            self.log("startwm.sh missing — creating it (Fedora ships none)...")
-            with open(startwm, "w") as f:
-                f.write(
-                    "#!/bin/sh\n"
-                    "if test -r /etc/profile; then . /etc/profile; fi\n"
-                    'if test -r "$HOME/.xsession"; then exec /bin/sh "$HOME/.xsession"; fi\n'
-                    "exec startxfce4\n"
-                )
-            os.chmod(startwm, 0o755)
-            needs_xrdp_restart = True
-            changes_made.append("startwm.sh created")
+        # xrdp's session runs /etc/xrdp/startwm.sh. We OVERRIDE the distro
+        # default on purpose: Fedora ships one hardcoded to `exec gnome-session`
+        # that ignores ~/.xsession — and GNOME 48+ is Wayland-only, so it aborts
+        # under xrdp (RDP window opens then closes). Write a portable launcher
+        # that prefers ~/.xsession (our XFCE one) and falls back to startxfce4.
+        startwm = Path("/etc/xrdp/startwm.sh")
+        backup = Path("/etc/xrdp/startwm.sh.orig")
+        if startwm.exists() and not backup.exists():
+            backup.write_text(startwm.read_text())
+        with open(startwm, "w") as f:
+            f.write(
+                "#!/bin/sh\n"
+                "if test -r /etc/profile; then . /etc/profile; fi\n"
+                'if test -r "$HOME/.xsession"; then exec /bin/sh "$HOME/.xsession"; fi\n'
+                "exec startxfce4\n"
+            )
+        os.chmod(startwm, 0o755)
+        needs_xrdp_restart = True
+        changes_made.append("startwm.sh configured for XFCE")
 
         self.log("Checking session idle/sleep/lock settings...")
         if self.desktop_type == "xfce":

@@ -262,93 +262,52 @@ class LocalUbuntuSetup:
             self.plat.ensure_extra_repos()
             self.plat.pkg_install("xrdp", logical=True)
 
+        # xrdp serves an XFCE session regardless of the machine's main desktop:
+        # GNOME 48+ is Wayland-only and aborts under xrdp's X11 backend, so we
+        # run XFCE for RDP and leave the user's GNOME console session untouched.
+        if not self.plat.pkg_installed("xfce4-session"):
+            self.log("Installing XFCE for the RDP session...")
+            self.plat.ensure_extra_repos()
+            self.plat.pkg_install("xfce", logical=True)
+
         # Needed to avoid TLS certificate errors in xrdp sessions
         self.run_command("adduser xrdp ssl-cert", check=False)
 
-        if self.desktop_type == "gnome":
-            self._configure_xrdp_for_gnome()
-        else:
-            self._configure_xrdp_for_xfce()
+        self._configure_xrdp_session()
 
         self.service_command("enable", "xrdp")
         self.service_command("restart", "xrdp")
         self.log("xrdp configured and started", "SUCCESS")
         self._save_state(xrdp_configured=True)
 
-    def _configure_xrdp_for_gnome(self):
+    def _configure_xrdp_session(self):
+        """Point xrdp at an XFCE session and stop sessions from blanking.
+
+        Writes a portable /etc/xrdp/startwm.sh that prefers the user's
+        ~/.xsession and falls back to startxfce4. This OVERRIDES the distro
+        default on purpose: Fedora ships a startwm.sh hardcoded to
+        `exec gnome-session` that ignores ~/.xsession, and GNOME 48+ is
+        Wayland-only so it aborts under xrdp's X11 backend (the RDP window
+        opens then immediately closes).
         """
-        Three-step GNOME + xrdp fix for Ubuntu 24.04:
-          1. Disable Wayland in GDM3 (xrdp requires an X11 session)
-          2. Write a polkit rule so the colour-manager auth popup never appears
-          3. Configure startwm.sh to launch gnome-session
-        """
-        # 1. Disable Wayland in GDM — path differs by distro:
-        #    Debian/Ubuntu: /etc/gdm3/custom.conf   RHEL/Fedora: /etc/gdm/custom.conf
-        gdm3_conf = Path("/etc/gdm3/custom.conf") if self.plat.is_debian \
-            else Path("/etc/gdm/custom.conf")
-        if gdm3_conf.exists():
-            text = gdm3_conf.read_text()
-            if "WaylandEnable=false" not in text:
-                # Uncomment the existing commented line if present
-                text = re.sub(r"#\s*WaylandEnable\s*=\s*false", "WaylandEnable=false", text)
-                # Otherwise inject under [daemon]
-                if "WaylandEnable=false" not in text:
-                    text = text.replace("[daemon]", "[daemon]\nWaylandEnable=false", 1)
-                gdm3_conf.write_text(text)
-                self.log(f"Disabled Wayland in GDM ({gdm3_conf})", "SUCCESS")
-            else:
-                self.log("Wayland already disabled in GDM", "SUCCESS")
-        else:
-            # Create a minimal gdm config if it doesn't exist
-            gdm3_conf.parent.mkdir(parents=True, exist_ok=True)
-            gdm3_conf.write_text("[daemon]\nWaylandEnable=false\n")
-            self.log(f"Created {gdm3_conf} with Wayland disabled", "SUCCESS")
-
-        # 2. Polkit rule — prevents colour-manager auth dialogs in every xrdp session
-        polkit_rule = """\
-polkit.addRule(function(action, subject) {
-    if ((action.id == "org.freedesktop.color-manager.create-device"  ||
-         action.id == "org.freedesktop.color-manager.create-profile" ||
-         action.id == "org.freedesktop.color-manager.delete-device"  ||
-         action.id == "org.freedesktop.color-manager.delete-profile" ||
-         action.id == "org.freedesktop.color-manager.modify-device"  ||
-         action.id == "org.freedesktop.color-manager.modify-profile") &&
-        subject.isInGroup("sudo")) {
-        return polkit.Result.YES;
-    }
-});
-"""
-        polkit_dir = Path("/etc/polkit-1/rules.d")
-        polkit_dir.mkdir(parents=True, exist_ok=True)
-        (polkit_dir / "45-allow-colord.rules").write_text(polkit_rule)
-        self.log("Polkit colour-manager rule written", "SUCCESS")
-
-        # 3. startwm.sh — launch a GNOME-on-X11 session
-        startwm_path = Path("/etc/xrdp/startwm.sh")
-        if startwm_path.exists():
-            backup = Path("/etc/xrdp/startwm.sh.pre-local-setup")
-            if not backup.exists():
-                backup.write_text(startwm_path.read_text())
-                self.log("Backed up original startwm.sh", "SUCCESS")
-
-        startwm_path.write_text(
+        startwm = Path("/etc/xrdp/startwm.sh")
+        backup = Path("/etc/xrdp/startwm.sh.orig")
+        if startwm.exists() and not backup.exists():
+            backup.write_text(startwm.read_text())
+            self.log("Backed up original startwm.sh", "SUCCESS")
+        startwm.write_text(
             "#!/bin/sh\n"
             "unset DBUS_SESSION_BUS_ADDRESS\n"
             "unset XDG_RUNTIME_DIR\n"
-            "exec gnome-session\n"
+            'if [ -x "$HOME/.xsession" ]; then exec "$HOME/.xsession"; fi\n'
+            "exec startxfce4\n"
         )
-        os.chmod(startwm_path, 0o755)
-        self.log("xrdp startwm.sh configured for GNOME", "SUCCESS")
+        os.chmod(startwm, 0o755)
+        self.log("xrdp startwm.sh configured for XFCE", "SUCCESS")
 
-    def _configure_xrdp_for_xfce(self):
-        """Disable sleep/screensaver for XFCE xrdp sessions."""
-        # Do NOT touch startwm.sh — the default xrdp behaviour of reading
-        # ~/.xsession works correctly and matches what the VPS setup does.
-
-        # Disable sleep/screensaver so xrdp sessions don't blank
+        # Disable sleep/screensaver so xrdp sessions don't blank.
         xfconf_dir = Path("/etc/xdg/xfce4/xfconf/xfce-perchannel-xml")
         xfconf_dir.mkdir(parents=True, exist_ok=True)
-
         power_xml = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-power-manager" version="1.0">
@@ -359,7 +318,6 @@ polkit.addRule(function(action, subject) {
     <property name="dpms-on-ac-off" type="uint" value="0"/>
   </property>
 </channel>"""
-
         screensaver_xml = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-screensaver" version="1.0">
@@ -368,7 +326,6 @@ polkit.addRule(function(action, subject) {
     <property name="lock-enabled" type="bool" value="false"/>
   </property>
 </channel>"""
-
         (xfconf_dir / "xfce4-power-manager.xml").write_text(power_xml)
         (xfconf_dir / "xfce4-screensaver.xml").write_text(screensaver_xml)
         self.log("XFCE power/screensaver configured for xrdp sessions", "SUCCESS")
@@ -487,22 +444,21 @@ polkit.addRule(function(action, subject) {
         return self._write_xsession_impl(username)
 
     def _write_xsession_impl(self, username):
-        """Write a desktop-appropriate .xsession for the user's xrdp sessions."""
+        """Write the user's xrdp .xsession — always XFCE. GNOME 48+ is
+        Wayland-only and can't run under xrdp's X11 backend, so the RDP session
+        is XFCE even on a GNOME machine (the console GNOME session is untouched)."""
         xsession_path = Path(f"/home/{username}/.xsession")
-        if self.desktop_type == "gnome":
-            content = (
-                "#!/bin/bash\n"
-                "unset DBUS_SESSION_BUS_ADDRESS\n"
-                "unset XDG_RUNTIME_DIR\n"
-                "exec gnome-session\n"
-            )
-        else:
-            content = "#!/bin/bash\nexec xfce4-session\n"
-
-        xsession_path.write_text(content)
+        xsession_path.write_text(
+            "#!/bin/bash\n"
+            "export XDG_SESSION_DESKTOP=xfce\n"
+            "export XDG_CURRENT_DESKTOP=XFCE\n"
+            "export DESKTOP_SESSION=xfce\n"
+            "exec startxfce4\n"
+        )
         self.run_command(f"chown {username}:{username} {xsession_path}")
-        self.run_command(f"chmod 755 {xsession_path}")
-        self.log(f"Written .xsession ({self.desktop_type}) for {username}", "SUCCESS")
+        self.run_command(f"chmod 700 {xsession_path}")
+        self.run_command(f"restorecon {xsession_path}", check=False)  # SELinux label
+        self.log(f"Written XFCE .xsession for {username}", "SUCCESS")
 
     def configure_grd(self):
         """Configure GNOME Remote Desktop (EL10). Runs after the install user is
