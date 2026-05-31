@@ -222,6 +222,16 @@ install_scripts() {
 create_shortcuts() {
     print_step 4 4 "Creating shortcuts...                    "
 
+    # On RHEL/Fedora, sudo's secure_path excludes /usr/local/bin (Ubuntu's
+    # includes it), so `sudo vps-post-setup` fails with "command not found".
+    # Add /usr/local/bin to secure_path so the documented commands work.
+    if [[ "$PKG_FAMILY" == "rhel" ]]; then
+        cat > /etc/sudoers.d/secureclaw-path << 'SUDOEOF'
+Defaults secure_path = /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+SUDOEOF
+        chmod 440 /etc/sudoers.d/secureclaw-path
+    fi
+
     cat > /usr/local/bin/vps-setup << EOF
 #!/bin/bash
 REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
