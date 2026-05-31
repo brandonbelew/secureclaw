@@ -467,14 +467,20 @@ class UniversalVPSSetup:
         if self.plat.rdp_stack_available():
             return
         name = self.os_info.get("PRETTY_NAME", "this system")
-        self.log("xrdp is not available in this distribution's repositories.", "ERROR")
-        print(f"\n{Colors.FAIL}{Colors.BOLD}  Remote desktop (xrdp) is not packaged for {name} yet.{Colors.ENDC}")
-        print(f"{Colors.WARNING}  EPEL 10 (RHEL/Rocky/Alma 10) has not yet shipped xrdp, xorgxrdp,{Colors.ENDC}")
-        print(f"{Colors.WARNING}  or the XFCE desktop. SecureClaw's remote-desktop setup needs one of:{Colors.ENDC}")
+        self.log("xrdp is not available on this distribution.", "ERROR")
+        print(f"\n{Colors.FAIL}{Colors.BOLD}  xrdp-based remote desktop is not available on {name}.{Colors.ENDC}")
+        print(f"{Colors.WARNING}  EL10 (RHEL/Rocky/Alma 10) removed the X.Org server — only Wayland{Colors.ENDC}")
+        print(f"{Colors.WARNING}  remains. xrdp's backend (xorgxrdp) is an Xorg module, and XFCE has{Colors.ENDC}")
+        print(f"{Colors.WARNING}  no Wayland port, so neither is packaged. This is permanent, not a delay.{Colors.ENDC}")
+        print()
+        print(f"  EL10's native remote desktop is {Colors.BOLD}gnome-remote-desktop{Colors.ENDC} (grdctl),")
+        print(f"  which SecureClaw does not configure yet.")
+        print()
+        print(f"  For SecureClaw's current xrdp setup, use one of:")
         print(f"      • Rocky Linux / AlmaLinux 9   (EL9 — fully supported)")
         print(f"      • Fedora")
         print(f"      • Ubuntu / Debian")
-        print(f"{Colors.DIM}  Re-run SecureClaw there, or on EL10 once EPEL packages xrdp.{Colors.ENDC}\n")
+        print()
         sys.exit(1)
 
     def detect_and_setup_desktop(self):

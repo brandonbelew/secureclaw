@@ -170,12 +170,14 @@ class Platform:
         return r.returncode == 0
 
     def rdp_stack_available(self):
-        """True if the remote-desktop stack (xrdp) is installable from the
+        """True if the xrdp remote-desktop stack is installable from the
         configured repos. Always True on Debian (xrdp is in the base archive).
-        On RHEL it depends on EPEL: EL8/EL9 have it, but EL10/EPEL-10 had not
-        packaged xrdp/xorgxrdp/xfce yet as of this writing — so a fresh Rocky/
-        Alma 10 box can't complete the desktop+RDP setup. Call AFTER
-        ensure_extra_repos() so EPEL is already enabled."""
+
+        On RHEL this is EPEL: EL8/EL9 have xrdp, but EL10 does NOT and never
+        will in this form — EL10 removed the X.Org server (Wayland only), so
+        xorgxrdp (an Xorg driver) has nothing to bind to and XFCE has no
+        Wayland port. EL10's native remote desktop is gnome-remote-desktop
+        instead. Call AFTER ensure_extra_repos() so EPEL is already enabled."""
         if self.is_debian:
             return True
         r = self.run("dnf -q list --available xrdp >/dev/null 2>&1", check=False)
