@@ -460,6 +460,23 @@ class UniversalVPSSetup:
         self.log("System update completed", "SUCCESS")
         self._save_state(system_updated=True)
 
+    def _abort_if_no_rdp_stack(self):
+        """Stop with clear guidance if xrdp isn't packaged for this distro
+        (e.g. RHEL/Rocky/Alma 10 — EPEL 10 hasn't shipped xrdp/XFCE yet),
+        instead of failing later with a confusing dnf 'Nothing to do' error."""
+        if self.plat.rdp_stack_available():
+            return
+        name = self.os_info.get("PRETTY_NAME", "this system")
+        self.log("xrdp is not available in this distribution's repositories.", "ERROR")
+        print(f"\n{Colors.FAIL}{Colors.BOLD}  Remote desktop (xrdp) is not packaged for {name} yet.{Colors.ENDC}")
+        print(f"{Colors.WARNING}  EPEL 10 (RHEL/Rocky/Alma 10) has not yet shipped xrdp, xorgxrdp,{Colors.ENDC}")
+        print(f"{Colors.WARNING}  or the XFCE desktop. SecureClaw's remote-desktop setup needs one of:{Colors.ENDC}")
+        print(f"      • Rocky Linux / AlmaLinux 9   (EL9 — fully supported)")
+        print(f"      • Fedora")
+        print(f"      • Ubuntu / Debian")
+        print(f"{Colors.DIM}  Re-run SecureClaw there, or on EL10 once EPEL packages xrdp.{Colors.ENDC}\n")
+        sys.exit(1)
+
     def detect_and_setup_desktop(self):
         """Detect installed desktop environment and install one if absent"""
         if self._step_done("desktop_setup"):
@@ -480,6 +497,7 @@ class UniversalVPSSetup:
             self.log("No desktop environment found — installing XFCE + LightDM + xrdp...", "WARNING")
             # xrdp lives in EPEL on RHEL family; ensure_extra_repos() enables it.
             self.plat.ensure_extra_repos()
+            self._abort_if_no_rdp_stack()
             self.plat.pkg_install("xfce", "lightdm", "xrdp", logical=True)
 
             Path("/etc/lightdm").mkdir(parents=True, exist_ok=True)
@@ -496,6 +514,7 @@ class UniversalVPSSetup:
             if not self.plat.pkg_installed("xrdp"):
                 self.log("xrdp not found on existing desktop — installing xrdp only...", "WARNING")
                 self.plat.ensure_extra_repos()
+                self._abort_if_no_rdp_stack()
                 self.plat.pkg_install("xrdp", logical=True)
                 self.service_command("enable", "xrdp")
 

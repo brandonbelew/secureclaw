@@ -131,18 +131,22 @@ class Platform:
         return out
 
     # ── package manager ─────────────────────────────────────────────────────
+    # The install/upgrade calls pass capture_output=False so their progress
+    # streams live — these are long operations (a full upgrade or the ~800 MB
+    # desktop install) and a captured/buffered run looks like a hang.
     def pkg_refresh(self):
         """Update the package index (apt update / dnf makecache)."""
         if self.is_debian:
-            self.run("apt-get update -qq", check=False)
+            self.run("apt-get update -qq", check=False, capture_output=False)
         else:
-            self.run("dnf -y makecache", check=False)
+            self.run("dnf -y makecache", check=False, capture_output=False)
 
     def pkg_upgrade(self):
         if self.is_debian:
-            self.run("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq", check=False)
+            self.run("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq",
+                     check=False, capture_output=False)
         else:
-            self.run("dnf -y upgrade", check=False)
+            self.run("dnf -y upgrade", check=False, capture_output=False)
 
     def pkg_install(self, *names, logical=False):
         """Install packages. If logical=True, names are run through packages()
@@ -152,9 +156,10 @@ class Platform:
             return
         joined = " ".join(pkgs)
         if self.is_debian:
-            self.run(f"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {joined}")
+            self.run(f"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {joined}",
+                     capture_output=False)
         else:
-            self.run(f"dnf -y install {joined}")
+            self.run(f"dnf -y install {joined}", capture_output=False)
 
     def pkg_installed(self, pkg):
         """True if a package is installed (replaces `dpkg -l` / `rpm -qa` checks)."""
@@ -164,12 +169,25 @@ class Platform:
             r = self.run(f"rpm -q {pkg} >/dev/null 2>&1", check=False)
         return r.returncode == 0
 
+    def rdp_stack_available(self):
+        """True if the remote-desktop stack (xrdp) is installable from the
+        configured repos. Always True on Debian (xrdp is in the base archive).
+        On RHEL it depends on EPEL: EL8/EL9 have it, but EL10/EPEL-10 had not
+        packaged xrdp/xorgxrdp/xfce yet as of this writing — so a fresh Rocky/
+        Alma 10 box can't complete the desktop+RDP setup. Call AFTER
+        ensure_extra_repos() so EPEL is already enabled."""
+        if self.is_debian:
+            return True
+        r = self.run("dnf -q list --available xrdp >/dev/null 2>&1", check=False)
+        return r.returncode == 0
+
     def pkg_install_local(self, path):
         """Install a downloaded package file (.deb on Debian, .rpm on RHEL)."""
         if self.is_debian:
-            self.run(f"DEBIAN_FRONTEND=noninteractive apt-get install -y {path}")
+            self.run(f"DEBIAN_FRONTEND=noninteractive apt-get install -y {path}",
+                     capture_output=False)
         else:
-            self.run(f"dnf -y install {path}")
+            self.run(f"dnf -y install {path}", capture_output=False)
 
     def ensure_extra_repos(self):
         """Enable distro repos needed for xrdp/xfce/etc.
@@ -182,7 +200,8 @@ class Platform:
         # Rocky/Alma/RHEL/CentOS Stream. dnf-plugins-core provides
         # `config-manager`, which is NOT on a minimal install but is needed to
         # enable CRB below; install it alongside epel-release.
-        self.run("dnf -y install epel-release dnf-plugins-core", check=False)
+        self.run("dnf -y install epel-release dnf-plugins-core",
+                 check=False, capture_output=False)
         # CodeReady Builder (named 'crb' on EL9+, 'powertools' on EL8) — some
         # EPEL packages depend on it. Try both; ignore the one that doesn't exist.
         self.run("dnf -y config-manager --set-enabled crb", check=False)
@@ -199,7 +218,8 @@ class Platform:
         if self.is_rhel:
             self.run(
                 "dnf -y install "
-                "https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm"
+                "https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm",
+                capture_output=False,
             )
             return
         try:
@@ -226,10 +246,12 @@ class Platform:
         Homebrew both need. git ships on most Debian images but NOT on Fedora
         Server, so it must be installed explicitly."""
         if self.is_debian:
-            self.run(f"curl -fsSL https://deb.nodesource.com/setup_{major}.x | bash -")
+            self.run(f"curl -fsSL https://deb.nodesource.com/setup_{major}.x | bash -",
+                     capture_output=False)
             self.pkg_install("nodejs")
         else:
-            self.run(f"curl -fsSL https://rpm.nodesource.com/setup_{major}.x | bash -")
+            self.run(f"curl -fsSL https://rpm.nodesource.com/setup_{major}.x | bash -",
+                     capture_output=False)
             self.pkg_install("nodejs")
         self.pkg_install("buildtools", "cmake", "python3", "git", logical=True)
 
