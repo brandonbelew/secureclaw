@@ -1833,6 +1833,7 @@ WantedBy=timers.target
 
 {Colors.BOLD}Applications Installed:{Colors.ENDC}
 • OpenClaw AI: {openclaw_status}
+  {Colors.WARNING}→ Finish OpenClaw setup: run  openclaw onboard  (as {rdp_user}){Colors.ENDC}
 • Google Chrome: {chrome_version}
 • Desktop shortcuts created for all users
 
