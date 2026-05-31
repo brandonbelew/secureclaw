@@ -213,8 +213,13 @@ class Platform:
         key = "/etc/gnome-remote-desktop/tls.key"
 
         # GDM + a graphical target are needed for the remote-login greeter.
+        # On a fresh server we boot to multi-user.target, and the --system GRD
+        # daemon's start job TIMES OUT if the graphical stack isn't up. Make it
+        # the default AND bring it up now (isolate keeps multi-user services —
+        # including this SSH session — running, since graphical requires them).
         self.run("systemctl set-default graphical.target", check=False)
         self.run("systemctl enable gdm", check=False)
+        self.run("systemctl isolate graphical.target", check=False)
 
         # Self-signed TLS cert for the RDP server. Generate it ONLY if absent —
         # regenerating changes the fingerprint, which makes already-connected
@@ -238,6 +243,9 @@ class Platform:
         self.run("grdctl --system rdp set-credentials "
                  f"{shlex.quote(username)} {shlex.quote(password)}")
         self.run("grdctl --system rdp enable")
+        # Clear any prior failed/restart-loop state (e.g. from an earlier run
+        # before the graphical target was up) so the start isn't rate-limited.
+        self.run("systemctl reset-failed gnome-remote-desktop.service", check=False)
         self.run("systemctl enable --now gnome-remote-desktop.service")
 
         self._suppress_gnome_initial_setup(username)

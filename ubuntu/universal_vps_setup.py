@@ -716,6 +716,25 @@ class UniversalVPSSetup:
 
         if getattr(self, "rdp_backend", "xrdp") == "grd":
             print(f"\n{Colors.HEADER}=== GNOME REMOTE DESKTOP ==={Colors.ENDC}")
+            # On a resumed run, create_rdp_user was skipped so the password
+            # (never persisted to disk) is gone — re-prompt and re-set it so the
+            # RDP credential gate and the GDM login stay in sync.
+            if not self.rdp_password:
+                while True:
+                    p1 = getpass.getpass(
+                        f"{Colors.CYAN}Re-enter the RDP/login password for "
+                        f"{self.rdp_username}: {Colors.ENDC}")
+                    if not p1:
+                        print(f"{Colors.WARNING}Password cannot be empty.{Colors.ENDC}")
+                        continue
+                    if p1 != getpass.getpass(f"{Colors.CYAN}Confirm: {Colors.ENDC}"):
+                        print(f"{Colors.WARNING}Passwords do not match.{Colors.ENDC}")
+                        continue
+                    self.rdp_password = p1
+                    break
+                subprocess.run(["chpasswd"],
+                               input=f"{self.rdp_username}:{self.rdp_password}",
+                               text=True, capture_output=True)
             self.log("Configuring GNOME Remote Desktop (RDP)...")
             self.plat.setup_gnome_remote_desktop(self.rdp_username, self.rdp_password)
             self.log("GNOME Remote Desktop configured and started", "SUCCESS")
