@@ -216,9 +216,13 @@ class Platform:
         self.run("systemctl set-default graphical.target", check=False)
         self.run("systemctl enable gdm", check=False)
 
-        # Self-signed TLS cert for the RDP server.
+        # Self-signed TLS cert for the RDP server. Generate it ONLY if absent —
+        # regenerating changes the fingerprint, which makes already-connected
+        # RDP clients reject the server ("unexpected certificate"). A stable
+        # cert keeps re-runs of the installer from breaking client trust.
         self.run("install -d -m 755 /etc/gnome-remote-desktop", check=False)
         self.run(
+            f"test -f {cert} && test -f {key} || "
             "openssl req -x509 -newkey rsa:4096 -days 3650 -nodes "
             f"-keyout {key} -out {cert} -subj '/CN=secureclaw'"
         )
