@@ -239,6 +239,7 @@ curl -fsSL "\$REPO_BASE/ubuntu/platform_support.py?\$(date +%s)" -o /usr/local/b
 curl -fsSL "\$REPO_BASE/ubuntu/universal_vps_setup.py?\$(date +%s)" -o /usr/local/bin/universal_vps_setup.py \
     && chmod +x /usr/local/bin/universal_vps_setup.py \
     || echo "  Warning: could not fetch latest script, running cached version"
+export SECURECLAW_BRANCH="${BRANCH}"
 python3 /usr/local/bin/universal_vps_setup.py "\$@"
 EOF
 
@@ -303,8 +304,9 @@ show_complete_vps() {
     echo -e "  ${CYAN}  2.${RESET}  You will create your RDP login username and password"
     echo -e "  ${CYAN}  3.${RESET}  You will be asked to authenticate Tailscale"
     echo -e "       ${DIM}(a link will appear — open it in your browser)${RESET}"
-    echo -e "  ${CYAN}  4.${RESET}  After lockdown, SSH will drop — reconnect via Tailscale"
-    echo -e "  ${CYAN}  5.${RESET}  Run ${YELLOW}sudo vps-post-setup${RESET} to finish the installation"
+    echo -e "  ${CYAN}  4.${RESET}  Everything installs in a single pass — OpenClaw, Chrome, lockdown"
+    echo -e "  ${CYAN}  5.${RESET}  The server locks down (and reboots if needed); reconnect over"
+    echo -e "       ${DIM}Tailscale and RDP in, then run: openclaw onboard${RESET}"
     echo
     print_divider
     echo

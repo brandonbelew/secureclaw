@@ -1330,8 +1330,87 @@ TAILSCALE TROUBLESHOOTING:
 
         return True
 
+    def _get_repo_branch(self):
+        """Which GitHub branch to pull assets (widget script) from."""
+        env_branch = os.environ.get("SECURECLAW_BRANCH", "")
+        if env_branch in ("main", "dev"):
+            return env_branch
+        try:
+            r = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True,
+                cwd=os.path.dirname(os.path.abspath(__file__))
+            )
+            if r.stdout.strip() in ("main", "dev"):
+                return r.stdout.strip()
+        except Exception:
+            pass
+        return "main"
+
+    def install_openclaw_widget(self):
+        """Install the OpenClaw Control Panel desktop widget."""
+        if self._step_done("widget_installed"):
+            self.log("OpenClaw widget already installed — skipping", "SUCCESS")
+            return
+
+        print(f"\n{Colors.HEADER}=== OPENCLAW CONTROL PANEL ==={Colors.ENDC}")
+        branch = self._get_repo_branch()
+        self.log(f"Using branch: {branch}")
+        raw_base = f"https://raw.githubusercontent.com/brandonbelew/secureclaw/{branch}"
+        install_bin = "/usr/local/bin/openclaw-widget"
+
+        self.run_command(f"wget -q -O {install_bin} {raw_base}/ubuntu/openclaw_widget.py")
+        os.chmod(install_bin, 0o755)
+        self.run_command(
+            f"sed -i 's/^REPO_BRANCH_OVERRIDE = None.*$/REPO_BRANCH_OVERRIDE = \"{branch}\"/' {install_bin}"
+        )
+
+        self.plat.pkg_install("gobject_gtk3", logical=True)
+
+        # Passwordless firewall-status check for the widget (sudo/ufw vs wheel/firewall-cmd).
+        admin = self.plat.admin_group
+        fw_status_cmd = "/usr/sbin/ufw status" if self.plat.is_debian else "/usr/bin/firewall-cmd --state"
+        sudoers_path = "/etc/sudoers.d/openclaw-widget"
+        with open(sudoers_path, "w") as f:
+            f.write("# Allow admins to check firewall status without password (used by openclaw-widget)\n"
+                    f"%{admin} ALL=(ALL) NOPASSWD: {fw_status_cmd}\n")
+        os.chmod(sudoers_path, 0o440)
+
+        app_dir = Path("/usr/local/share/applications")
+        app_dir.mkdir(parents=True, exist_ok=True)
+        desktop_content = (
+            "[Desktop Entry]\n"
+            "Name=OpenClaw Control Panel\n"
+            "Comment=OpenClaw service status and launcher\n"
+            "Exec=/usr/local/bin/openclaw-widget\n"
+            "Icon=network-server\n"
+            "Terminal=false\n"
+            "Type=Application\n"
+            "Categories=Network;System;\n"
+            "StartupNotify=true\n"
+            "X-GNOME-Autostart-enabled=true\n"
+        )
+        (app_dir / "openclaw-widget.desktop").write_text(desktop_content)
+
+        for user_dir in _real_user_homes():
+            username = user_dir.name
+            autostart_dir = user_dir / ".config" / "autostart"
+            autostart_dir.mkdir(parents=True, exist_ok=True)
+            (autostart_dir / "openclaw-widget.desktop").write_text(desktop_content)
+            self.run_command(f"chown -R {username}:{username} {autostart_dir}")
+            user_desktop = user_dir / "Desktop"
+            user_desktop.mkdir(exist_ok=True)
+            shortcut = user_desktop / "openclaw-widget.desktop"
+            shortcut.write_text(desktop_content)
+            self.run_command(f"chmod +x {shortcut}")
+            self.run_command(f"chown {username}:{username} {shortcut}")
+            self.log(f"Autostart + desktop shortcut created for {username}", "SUCCESS")
+
+        self.log("OpenClaw Control Panel installed", "SUCCESS")
+        self._save_state(widget_installed=True)
+
     def install_applications(self):
-        """Install OpenClaw and Chrome"""
+        """Install OpenClaw, Homebrew, Chrome, the security-check tool and widget."""
         if self.gui_available:
             self.show_gui_progress("Installing Applications", "Installing OpenClaw and Google Chrome...")
 
@@ -1340,6 +1419,7 @@ TAILSCALE TROUBLESHOOTING:
         self.install_chrome()
         self.install_chrome_cleanup()
         self.install_security_check()
+        self.install_openclaw_widget()
         self.create_user_shortcuts()
 
     def install_openclaw(self):
@@ -1923,10 +2003,11 @@ WantedBy=timers.target
         try:
             self.show_startup_message()
 
-            # If lockdown already done for SSH users, nothing left to do in phase 1
-            if self._step_done("server_locked_down") and self.initial_access_method == "SSH":
-                print(f"\n{Colors.GREEN}Phase 1 already complete.{Colors.ENDC}")
-                print(f"{Colors.WARNING}Reconnect via Tailscale ({self.tailscale_ip}) and run post_lockdown_setup.py{Colors.ENDC}")
+            # Resumed run after everything's done (the box is locked down).
+            if self._step_done("server_locked_down"):
+                print(f"\n{Colors.GREEN}Setup already complete — the server is locked down.{Colors.ENDC}")
+                print(f"{Colors.WARNING}RDP to {self.tailscale_ip}:3389 (user {self.rdp_username}). "
+                      f"Finish OpenClaw with: openclaw onboard{Colors.ENDC}")
                 return
 
             response = self.get_user_input(
@@ -1946,40 +2027,36 @@ WantedBy=timers.target
             self.configure_rdp_persistence()
             self.install_tailscale()
 
-            if self.configure_tailscale():
-                if self.test_tailscale_connection():
-                    if self.lockdown_server():
-                        # GNOME Remote Desktop only comes up correctly on a clean
-                        # boot — reboot now to activate it (SSH was dropping
-                        # anyway). After reboot the box is Tailscale-only with RDP
-                        # live; reconnect and run vps-post-setup.
-                        if self.grd_needs_reboot:
-                            print(f"\n{Colors.GREEN}{Colors.BOLD}  Phase 1 Complete!{Colors.ENDC}")
-                            print(f"{Colors.WARNING}  Rebooting to activate remote desktop...{Colors.ENDC}")
-                            print(f"{Colors.WARNING}  After ~1 minute, reconnect via Tailscale:{Colors.ENDC}")
-                            print(f"{Colors.BOLD}      ssh {self.rdp_username or 'your-user'}@{self.tailscale_ip}{Colors.ENDC}")
-                            print(f"{Colors.WARNING}  then run: {Colors.BOLD}sudo vps-post-setup{Colors.ENDC}")
-                            print(f"{Colors.FAIL}  Do NOT run vps-post-setup inside an RDP session.{Colors.ENDC}")
-                            sys.stdout.flush()
-                            time.sleep(5)
-                            self.run_command("systemctl reboot", check=False)
-                            return
+            if not self.configure_tailscale():
+                print(f"{Colors.WARNING}Setup stopped: Tailscale was not configured.{Colors.ENDC}")
+                return
+            if not self.test_tailscale_connection():
+                print(f"{Colors.FAIL}Setup aborted due to Tailscale connectivity issues.{Colors.ENDC}")
+                return
 
-                        if self.initial_access_method == "SSH":
-                            print(f"\n{Colors.GREEN}{Colors.BOLD}  Phase 1 Complete!{Colors.ENDC}")
-                            print(f"{Colors.WARNING}  • If you stayed connected: run sudo vps-post-setup right here in this window.{Colors.ENDC}")
-                            print(f"{Colors.WARNING}  • If you got disconnected: reconnect via SSH to {self.tailscale_ip}{Colors.ENDC}")
-                            print(f"{Colors.WARNING}    then run: sudo vps-post-setup{Colors.ENDC}")
-                            print(f"{Colors.FAIL}  IMPORTANT: Do NOT run sudo vps-post-setup inside an RDP session.{Colors.ENDC}")
-                            return
+            # Single pass: install everything now — over the still-alive SSH
+            # session, after Tailscale is confirmed working but before the
+            # lockdown. No separate vps-post-setup step.
+            self.install_applications()
+            self.create_final_report()
 
-                        elif self.initial_access_method == "RDP":
-                            self.install_applications()
-                            self.create_final_report()
-                else:
-                    print(f"{Colors.FAIL}Setup aborted due to connectivity issues{Colors.ENDC}")
+            if not self.lockdown_server():
+                print(f"{Colors.WARNING}Apps installed, but the firewall lockdown was cancelled.{Colors.ENDC}")
+                return
+
+            # The established SSH session survives the lockdown, so these print.
+            # New connections must come over Tailscale.
+            if self.grd_needs_reboot:
+                print(f"\n{Colors.GREEN}{Colors.BOLD}  Setup complete — rebooting to activate remote desktop...{Colors.ENDC}")
+                print(f"{Colors.WARNING}  After ~1 minute, RDP to {Colors.BOLD}{self.tailscale_ip}:3389{Colors.ENDC}"
+                      f"{Colors.WARNING} as {self.rdp_username}, then run: openclaw onboard{Colors.ENDC}")
+                sys.stdout.flush()
+                time.sleep(5)
+                self.run_command("systemctl reboot", check=False)
             else:
-                print(f"{Colors.WARNING}Setup completed without Tailscale configuration{Colors.ENDC}")
+                print(f"\n{Colors.GREEN}{Colors.BOLD}  Setup complete — server locked down to Tailscale-only.{Colors.ENDC}")
+                print(f"{Colors.WARNING}  Your SSH session may drop; reconnect over Tailscale.{Colors.ENDC}")
+                print(f"{Colors.WARNING}  RDP to {self.tailscale_ip}:3389 as {self.rdp_username}, then: openclaw onboard{Colors.ENDC}")
 
         except KeyboardInterrupt:
             print(f"\n{Colors.WARNING}Setup interrupted by user{Colors.ENDC}")
