@@ -67,6 +67,7 @@ class UniversalVPSSetup:
         self.tailscale_ip = state.get("tailscale_ip")
         self.rdp_backend = state.get("rdp_backend")  # 'xrdp' or 'grd'
         self.rdp_password = None  # set during create_rdp_user (for grd creds)
+        self.grd_needs_reboot = False  # GRD activates only on a clean boot
 
     # ── State management ──────────────────────────────────────────────────────
 
@@ -751,7 +752,10 @@ class UniversalVPSSetup:
                                text=True, capture_output=True)
             self.log("Configuring GNOME Remote Desktop (RDP)...")
             self.plat.setup_gnome_remote_desktop(self.rdp_username, self.rdp_password)
-            self.log("GNOME Remote Desktop configured and started", "SUCCESS")
+            # GRD starts cleanly only in systemd boot order, so a reboot at the
+            # end of phase 1 activates it (see setup_gnome_remote_desktop).
+            self.grd_needs_reboot = True
+            self.log("GNOME Remote Desktop configured (activates on reboot)", "SUCCESS")
             self._save_state(rdp_configured=True)
             return
 
@@ -1945,6 +1949,22 @@ WantedBy=timers.target
             if self.configure_tailscale():
                 if self.test_tailscale_connection():
                     if self.lockdown_server():
+                        # GNOME Remote Desktop only comes up correctly on a clean
+                        # boot — reboot now to activate it (SSH was dropping
+                        # anyway). After reboot the box is Tailscale-only with RDP
+                        # live; reconnect and run vps-post-setup.
+                        if self.grd_needs_reboot:
+                            print(f"\n{Colors.GREEN}{Colors.BOLD}  Phase 1 Complete!{Colors.ENDC}")
+                            print(f"{Colors.WARNING}  Rebooting to activate remote desktop...{Colors.ENDC}")
+                            print(f"{Colors.WARNING}  After ~1 minute, reconnect via Tailscale:{Colors.ENDC}")
+                            print(f"{Colors.BOLD}      ssh {self.rdp_username or 'your-user'}@{self.tailscale_ip}{Colors.ENDC}")
+                            print(f"{Colors.WARNING}  then run: {Colors.BOLD}sudo vps-post-setup{Colors.ENDC}")
+                            print(f"{Colors.FAIL}  Do NOT run vps-post-setup inside an RDP session.{Colors.ENDC}")
+                            sys.stdout.flush()
+                            time.sleep(5)
+                            self.run_command("systemctl reboot", check=False)
+                            return
+
                         if self.initial_access_method == "SSH":
                             print(f"\n{Colors.GREEN}{Colors.BOLD}  Phase 1 Complete!{Colors.ENDC}")
                             print(f"{Colors.WARNING}  • If you stayed connected: run sudo vps-post-setup right here in this window.{Colors.ENDC}")

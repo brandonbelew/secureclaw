@@ -70,6 +70,7 @@ class LocalUbuntuSetup:
         self.tailscale_ip = state.get("tailscale_ip")
         self.rdp_backend  = state.get("rdp_backend")  # 'xrdp' or 'grd'
         self.rdp_password = None  # captured during user selection (grd needs it)
+        self.grd_needs_reboot = False  # GRD activates only on a clean boot
 
     # ── State management ──────────────────────────────────────────────────────
 
@@ -494,11 +495,9 @@ class LocalUbuntuSetup:
                 self.log(f"Failed to set password: {cp.stderr}", "WARNING")
 
         self.log("Configuring GNOME Remote Desktop (RDP)...")
-        # Don't restart GDM here — a local install may be running from inside
-        # the user's own GNOME session, and restarting it would log them out.
-        self.plat.setup_gnome_remote_desktop(
-            self.install_user, self.rdp_password, restart_display_manager=False)
-        self.log("GNOME Remote Desktop configured and started", "SUCCESS")
+        self.plat.setup_gnome_remote_desktop(self.install_user, self.rdp_password)
+        self.grd_needs_reboot = True  # GRD activates on the next boot
+        self.log("GNOME Remote Desktop configured (activates on reboot)", "SUCCESS")
         self._save_state(xrdp_configured=True)
 
     # ── Tailscale ─────────────────────────────────────────────────────────────
@@ -1312,6 +1311,15 @@ Categories=System;Security;
             self.create_final_report()
 
             print(f"\n{Colors.GREEN}{Colors.BOLD}All setup tasks completed!{Colors.ENDC}\n")
+
+            # GNOME Remote Desktop only comes up cleanly on a fresh boot.
+            if self.grd_needs_reboot:
+                print(f"{Colors.WARNING}{Colors.BOLD}  A reboot is required to activate remote desktop (GNOME Remote Desktop).{Colors.ENDC}")
+                ans = input(f"{Colors.CYAN}  Reboot now? [Y/n] > {Colors.ENDC}").strip().lower()
+                if ans in ("", "y", "yes"):
+                    self.run_command("systemctl reboot", check=False)
+                else:
+                    print(f"{Colors.WARNING}  Remember to reboot before connecting via RDP.{Colors.ENDC}")
 
         except KeyboardInterrupt:
             print(f"\n{Colors.WARNING}Setup interrupted. Re-run to resume.{Colors.ENDC}")

@@ -200,9 +200,15 @@ class Platform:
         self.run('dnf -y group install "Server with GUI"', capture_output=False)
         self.pkg_install("gnome-remote-desktop")
 
-    def setup_gnome_remote_desktop(self, username, password, restart_display_manager=True):
+    def setup_gnome_remote_desktop(self, username, password):
         """Configure GNOME Remote Desktop in --system (remote-login) mode and
-        start it. Validated on Rocky 10 / GNOME 49.
+        ENABLE it for boot. Validated on Rocky 10 / GNOME 49.
+
+        The service is intentionally NOT started here: on a freshly-provisioned
+        box the --system daemon races GDM's RemoteDisplayFactory and its
+        Type=dbus start job times out (then restart-loops). It starts cleanly in
+        systemd boot order, so the installer reboots once to activate it (the
+        lockdown drops SSH anyway). Caller should reboot after this + lockdown.
 
         --system stores credentials in a root-only system keyfile, which is the
         only headless-safe option: the per-user modes store them in the GNOME
@@ -212,14 +218,11 @@ class Platform:
         cert = "/etc/gnome-remote-desktop/tls.crt"
         key = "/etc/gnome-remote-desktop/tls.key"
 
-        # GDM + a graphical target are needed for the remote-login greeter.
-        # On a fresh server we boot to multi-user.target, so make graphical the
-        # default, enable everything for boot, and bring graphical up now
-        # (additive — multi-user services, incl. this SSH session, keep running).
+        # Boot to graphical.target with GDM + GRD enabled (the reboot activates
+        # them in the correct order).
         self.run("systemctl set-default graphical.target", check=False)
         self.run("systemctl enable gdm", check=False)
         self.run("systemctl enable gnome-remote-desktop.service", check=False)
-        self.run("systemctl start graphical.target", check=False)
 
         # Self-signed TLS cert for the RDP server. Generate it ONLY if absent —
         # regenerating changes the fingerprint, which makes already-connected
@@ -243,24 +246,12 @@ class Platform:
         self.run("grdctl --system rdp set-credentials "
                  f"{shlex.quote(username)} {shlex.quote(password)}")
         self.run("grdctl --system rdp enable")
-
-        # Start the RDP service. The --system daemon hands over to GDM and only
-        # claims its Type=dbus name (org.gnome.RemoteDesktop) once GDM's
-        # RemoteDisplayFactory is up — start it too early and the unit's start
-        # job times out (90s) even though the RDP server itself came up.
-        # So: give GDM a clean state, WAIT for org.gnome.DisplayManager on the
-        # system bus, then start GRD. (On a server we can restart GDM freely;
-        # restart_display_manager=False for a local desktop install where the
-        # user may be sitting in an active GNOME session.)
-        if restart_display_manager:
-            self.run("systemctl restart gdm", check=False)
-        self.run(
-            "for i in $(seq 1 20); do "
-            "busctl --system list 2>/dev/null | grep -q org.gnome.DisplayManager "
-            "&& break; sleep 2; done",
-            check=False)
+        # NB: not started here — see the method docstring. The installer reboots
+        # once after lockdown; GRD comes up active and listening on 3389 then.
+        # Clear any failed/looping instance from a prior run so it doesn't churn
+        # until that reboot (it stays enabled and starts fresh in boot order).
+        self.run("systemctl stop gnome-remote-desktop.service", check=False)
         self.run("systemctl reset-failed gnome-remote-desktop.service", check=False)
-        self.run("systemctl start gnome-remote-desktop.service")
 
         self._suppress_gnome_initial_setup(username)
 
