@@ -10,12 +10,35 @@ import sys
 import subprocess
 import time
 import pwd
+import json
 from pathlib import Path
 from platform_support import Platform
 
 # Injected at install time by vps-post-setup shortcut via sed.
 # When None, _get_repo_branch() falls back to git detection.
 REPO_BRANCH_OVERRIDE = None  # injected at install time
+
+# Written by universal_vps_setup.py's __init__ — the authoritative record of
+# which agent a `vps-setup` run actually installed. Checked in preference to
+# SECURECLAW_AGENT, which is only set when this script is invoked through the
+# vps-post-setup wrapper (and only on wrappers regenerated after that env var
+# was introduced) — a direct `python3 post_lockdown_setup.py` invocation, or
+# an older cached wrapper, would otherwise silently default to "openclaw".
+VPS_SETUP_STATE_FILE = "/var/lib/vps-setup/state.json"
+
+
+def _get_agent_type():
+    """Which agent this server was actually set up with, if known."""
+    try:
+        with open(VPS_SETUP_STATE_FILE) as f:
+            agent = json.load(f).get("agent_type", "")
+        if agent in ("openclaw", "hermes"):
+            return agent
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    env_agent = os.environ.get("SECURECLAW_AGENT", "").strip().lower()
+    return env_agent if env_agent in ("openclaw", "hermes") else "openclaw"
+
 
 def _real_user_homes():
     """Yield Path objects for /home subdirs owned by real system users (uid >= 1000).
@@ -875,7 +898,19 @@ not a substitute for good security practices:
         print("    Post-Lockdown Setup Continuation")
         print("=" * 60)
         print(f"{Colors.ENDC}")
-        
+
+        # This legacy fallback only knows how to install OpenClaw. The
+        # single-pass vps-setup flow installs the chosen agent (OpenClaw or
+        # Hermes) up front and doesn't need this script at all any more — but
+        # it's still an installed command, so refuse rather than silently
+        # installing OpenClaw on top of a Hermes deployment.
+        if _get_agent_type() == "hermes":
+            print(f"{Colors.WARNING}This command only knows how to install OpenClaw, but this server "
+                  f"was set up with Hermes Agent.{Colors.ENDC}")
+            print(f"{Colors.WARNING}Nothing to do here — vps-setup already installed everything in a "
+                  f"single pass. Run  hermes setup  to finish configuring Hermes.{Colors.ENDC}")
+            return
+
         try:
             if not self.verify_tailscale_connection():
                 print(f"{Colors.FAIL}Tailscale connection could not be verified!{Colors.ENDC}")

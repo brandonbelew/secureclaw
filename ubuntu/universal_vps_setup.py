@@ -2,7 +2,8 @@
 """
 Universal VPS Setup Script (Debian/Ubuntu + RHEL family)
 Handles both SSH and RDP initial access scenarios
-Configures RDP, Tailscale, security lockdown, and installs OpenClaw + Chrome
+Configures RDP, Tailscale, security lockdown, and installs an AI agent
+(OpenClaw or Hermes Agent, via SECURECLAW_AGENT) + Chrome
 Author: Brandon
 """
 
@@ -51,6 +52,13 @@ class Colors:
     DIM = '\033[2m'
 
 class UniversalVPSSetup:
+    # AI agent choices — label for display, onboard_cmd for the manual
+    # follow-up step deferred by the non-interactive installer flags.
+    AGENT_INFO = {
+        "openclaw": {"label": "OpenClaw", "onboard_cmd": "openclaw onboard"},
+        "hermes":   {"label": "Hermes Agent", "onboard_cmd": "hermes setup"},
+    }
+
     def __init__(self):
         self.setup_log = []
         self.os_info = self._detect_os_info()
@@ -68,6 +76,42 @@ class UniversalVPSSetup:
         self.rdp_backend = state.get("rdp_backend")  # 'xrdp' or 'grd'
         self.rdp_password = None  # set during create_rdp_user (for grd creds)
         self.grd_needs_reboot = False  # GRD activates only on a clean boot
+
+        # Which AI agent to install. SECURECLAW_AGENT (baked into the vps-setup
+        # wrapper by the most recent install.sh run) takes priority over any
+        # previously-persisted choice, so re-running install.sh to pick a
+        # different agent after an interrupted attempt actually takes effect —
+        # UNLESS an agent has already actually been installed on this box.
+        # Switching agents mid-lifecycle isn't supported: the security-check
+        # script, widget, and final report are each generated once behind
+        # their own _step_done() gate, so silently changing agent_type after
+        # that point would leave them permanently describing the wrong agent.
+        # Once installed, the choice sticks; persisted state is otherwise
+        # only the fallback — for a direct re-invocation of this script
+        # (e.g. `sudo vps-setup`, or the raw .py) where the wrapper's env
+        # var is unset or invalid.
+        env_agent = os.environ.get("SECURECLAW_AGENT", "").strip().lower()
+        prior_agent = state.get("agent_type")
+        agent_already_installed = bool(state.get("openclaw_installed") or state.get("hermes_installed"))
+        if agent_already_installed and prior_agent not in self.AGENT_INFO:
+            # Box was set up before agent_type existed in state — it can
+            # only have been OpenClaw (Hermes always saves agent_type).
+            prior_agent = "hermes" if state.get("hermes_installed") else "openclaw"
+
+        if agent_already_installed and prior_agent in self.AGENT_INFO:
+            self.agent_type = prior_agent
+            if env_agent in self.AGENT_INFO and env_agent != prior_agent:
+                print(f"{Colors.WARNING}Note: this server already has "
+                      f"{self.AGENT_INFO[prior_agent]['label']} installed — ignoring the new "
+                      f"'{env_agent}' selection. Switching AI agents on an already-configured "
+                      f"server isn't supported by this installer.{Colors.ENDC}")
+        elif env_agent in self.AGENT_INFO:
+            self.agent_type = env_agent
+        else:
+            self.agent_type = prior_agent if prior_agent in self.AGENT_INFO else "openclaw"
+        self._save_state(agent_type=self.agent_type)
+        self.agent_label = self.AGENT_INFO[self.agent_type]["label"]
+        self.agent_onboard_cmd = self.AGENT_INFO[self.agent_type]["onboard_cmd"]
 
     # ── State management ──────────────────────────────────────────────────────
 
@@ -237,7 +281,7 @@ class UniversalVPSSetup:
 
         os_name = self.os_info.get("PRETTY_NAME", "Unknown OS")
         state = self._load_state()
-        completed = [k for k, v in state.items() if v and not k.startswith(("desktop_type", "rdp_username", "tailscale_ip"))]
+        completed = [k for k, v in state.items() if v and not k.startswith(("desktop_type", "rdp_username", "tailscale_ip", "agent_type"))]
 
         print(f"{Colors.CYAN}Detected Environment:{Colors.ENDC}")
         print(f"  • OS: {Colors.BOLD}{os_name}{Colors.ENDC}")
@@ -268,7 +312,7 @@ class UniversalVPSSetup:
                         "• Enhance RDP with session persistence\n"
                         "• Install and configure Tailscale VPN\n"
                         "• Lock down server security\n"
-                        "• Install OpenClaw and Chrome\n\n"
+                        f"• Install {self.agent_label} and Chrome\n\n"
                         "Continue with setup?"
                     )
                     root.destroy()
@@ -1297,14 +1341,12 @@ TAILSCALE TROUBLESHOOTING:
         self._save_state(server_locked_down=True)
 
         if self.initial_access_method == "SSH":
+            # Everything (agent, Chrome, lockdown) already ran in this single
+            # pass above — nothing is deferred to vps-post-setup any more.
             print(f"\n{Colors.WARNING}  ⚠  Your connection may disconnect — this is normal.{Colors.ENDC}")
-            print(f"\n{Colors.BOLD}  What to do next:{Colors.ENDC}")
-            print(f"{Colors.WARNING}  • If you stay connected: run sudo vps-post-setup right here in this window.{Colors.ENDC}")
-            print(f"{Colors.WARNING}  • If you get disconnected: reconnect via SSH to {self.tailscale_ip}{Colors.ENDC}")
-            print(f"{Colors.WARNING}    then run: sudo vps-post-setup{Colors.ENDC}")
-            print(f"{Colors.WARNING}    (this finishes installing OpenClaw and Chrome){Colors.ENDC}")
-            print(f"\n{Colors.FAIL}  ✗  IMPORTANT: Do NOT run sudo vps-post-setup inside an RDP session.{Colors.ENDC}")
-            print(f"{Colors.FAIL}     Use this console or a direct SSH terminal only.{Colors.ENDC}\n")
+            print(f"\n{Colors.GREEN}  Setup is already complete — {self.agent_label} and Chrome are installed.{Colors.ENDC}")
+            print(f"{Colors.WARNING}  If you get disconnected, just reconnect via SSH or RDP to {self.tailscale_ip}.{Colors.ENDC}")
+            print(f"{Colors.WARNING}  There's nothing further to run.{Colors.ENDC}\n")
 
             for i in range(10, 0, -1):
                 print(f"{Colors.WARNING}  Closing connection in {i}...{Colors.ENDC}")
@@ -1410,17 +1452,26 @@ TAILSCALE TROUBLESHOOTING:
         self._save_state(widget_installed=True)
 
     def install_applications(self):
-        """Install OpenClaw, Homebrew, Chrome, the security-check tool and widget."""
+        """Install the AI agent, Homebrew, Chrome, the security-check tool and widget."""
         if self.gui_available:
-            self.show_gui_progress("Installing Applications", "Installing OpenClaw and Google Chrome...")
+            self.show_gui_progress("Installing Applications", f"Installing {self.agent_label} and Google Chrome...")
 
-        self.install_openclaw()
-        self.install_homebrew()
+        self.install_agent()
+        if self.agent_type == "openclaw":
+            self.install_homebrew()
         self.install_chrome()
         self.install_chrome_cleanup()
         self.install_security_check()
-        self.install_openclaw_widget()
+        if self.agent_type == "openclaw":
+            self.install_openclaw_widget()
         self.create_user_shortcuts()
+
+    def install_agent(self):
+        """Install the selected AI agent (OpenClaw or Hermes Agent)."""
+        if self.agent_type == "hermes":
+            self.install_hermes()
+        else:
+            self.install_openclaw()
 
     def install_openclaw(self):
         """Install OpenClaw using the official installer"""
@@ -1466,6 +1517,56 @@ TAILSCALE TROUBLESHOOTING:
         self.run_command(f"loginctl enable-linger {install_user}")
         self.log("OpenClaw installed and gateway service registered", "SUCCESS")
         self._save_state(openclaw_installed=True)
+
+    def _hermes_command_paths(self, install_user):
+        """Candidate locations for the `hermes` command, per the installer's
+        own resolve_install_layout(): FHS layout (/usr/local/bin) for a fresh
+        root install, ~/.local/bin otherwise — including a root install that
+        reused a pre-existing legacy checkout, which keeps the non-root-style
+        command dir even when running as root. Checking these paths directly
+        avoids depending on `su - user`'s login-shell PATH picking up
+        ~/.local/bin, which isn't guaranteed for every account/shell-rc
+        combination."""
+        if install_user == "root":
+            return ["/usr/local/bin/hermes", "/root/.local/bin/hermes"]
+        return [f"/home/{install_user}/.local/bin/hermes"]
+
+    def install_hermes(self):
+        """Install Hermes Agent using the official Nous Research installer"""
+        if self._step_done("hermes_installed"):
+            self.log("Hermes Agent already installed — skipping", "SUCCESS")
+            return
+
+        print(f"\n{Colors.HEADER}=== HERMES AGENT INSTALLATION ==={Colors.ENDC}")
+        self.log("Installing Hermes Agent...")
+
+        install_user = self.rdp_username or "root"
+
+        # Pre-install Node.js as root — Hermes' installer can manage its own,
+        # but a system Node avoids the extra download when it's new enough.
+        self.log("Installing Node.js and build tools...")
+        print(f"\n  {Colors.WARNING}{Colors.BOLD}⚠  Note:{Colors.ENDC}{Colors.WARNING} This step can take 2–3 minutes and may appear to hang.{Colors.ENDC}")
+        print(f"  {Colors.WARNING}   If progress stops, press Enter a few times to continue.{Colors.ENDC}\n")
+        self.plat.install_node("22")
+
+        # Run the official Hermes installer as the target user. --skip-setup
+        # defers API-key / messaging-platform configuration to a later
+        # `hermes setup` run (parallels OpenClaw's --no-onboard);
+        # --non-interactive keeps the optional system-package and gateway
+        # prompts from blocking when there's no attached TTY.
+        self.log("Running official Hermes Agent installer...")
+        self.run_command(
+            f"su - {install_user} -c "
+            f"'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | "
+            f"bash -s -- --skip-setup --non-interactive'",
+            capture_output=False
+        )
+
+        # Enable linger so the user's systemd services (once configured via
+        # `hermes gateway install`) can run without an active login session
+        self.run_command(f"loginctl enable-linger {install_user}")
+        self.log("Hermes Agent installed", "SUCCESS")
+        self._save_state(hermes_installed=True)
 
     def install_homebrew(self):
         """Pre-install Homebrew so OpenClaw skills install correctly during onboarding"""
@@ -1554,6 +1655,43 @@ TAILSCALE TROUBLESHOOTING:
         # FIX_SSH_RULE / FIX_RDP_RULE, populating $fw_out for later sections.
         fw_check, fw_fix = self.plat.security_check_firewall_fragments()
 
+        if self.agent_type == "hermes":
+            hermes_test = " || ".join(
+                f'[ -x "{p}" ]' for p in self._hermes_command_paths(self.rdp_username or "root")
+            )
+            agent_check = f"""
+# ── Hermes Agent ──────────────────────────────────────────────────────────────
+section "Hermes Agent"
+if {hermes_test}; then
+    pass "Hermes Agent is installed"
+    info "Manage the gateway (messaging/background service) with: hermes gateway install"
+else
+    warn "Hermes Agent does not appear to be installed"
+fi
+"""
+        else:
+            agent_check = r"""
+# ── OpenClaw ──────────────────────────────────────────────────────────────────
+section "OpenClaw"
+if systemctl is-active --quiet openclaw; then
+    pass "OpenClaw service is running"
+    oc_ports=$(ss -tlnp 2>/dev/null | grep -i openclaw | awk '{print $4}' | sed 's/.*://' | sort -u)
+    if [ -n "$oc_ports" ]; then
+        for port in $oc_ports; do
+            if echo "$fw_out" | grep -q "$port"; then
+                pass "OpenClaw port $port has an explicit firewall rule"
+            else
+                info "OpenClaw port $port — covered by the firewall's default-deny"
+            fi
+        done
+    else
+        info "OpenClaw does not expose a network port"
+    fi
+else
+    warn "OpenClaw service is not running"; RESTART_SVCS+=("openclaw")
+fi
+"""
+
         script = r"""#!/bin/bash
 # SecureClaw Security Verification
 
@@ -1627,25 +1765,7 @@ else
     warn "RDP server does not appear to be listening on 3389"
 fi
 
-# ── OpenClaw ──────────────────────────────────────────────────────────────────
-section "OpenClaw"
-if systemctl is-active --quiet openclaw; then
-    pass "OpenClaw service is running"
-    oc_ports=$(ss -tlnp 2>/dev/null | grep -i openclaw | awk '{print $4}' | sed 's/.*://' | sort -u)
-    if [ -n "$oc_ports" ]; then
-        for port in $oc_ports; do
-            if echo "$fw_out" | grep -q "$port"; then
-                pass "OpenClaw port $port has an explicit firewall rule"
-            else
-                info "OpenClaw port $port — covered by the firewall's default-deny"
-            fi
-        done
-    else
-        info "OpenClaw does not expose a network port"
-    fi
-else
-    warn "OpenClaw service is not running"; RESTART_SVCS+=("openclaw")
-fi
+""" + agent_check + r"""
 
 # ── Services ──────────────────────────────────────────────────────────────────
 section "Services"
@@ -1835,7 +1955,7 @@ WantedBy=timers.target
                 "url": "https://docs.openclaw.ai/tools/browser",
                 "icon": "text-html",
             },
-        ]
+        ] if self.agent_type == "openclaw" else []
 
         for user_dir in user_dirs:
             username = user_dir.name
@@ -1910,13 +2030,18 @@ WantedBy=timers.target
         except:
             chrome_version = "Installation failed"
 
-        try:
-            openclaw_result = self.run_command("systemctl is-active openclaw", check=False)
-            openclaw_status = "Running" if openclaw_result.stdout.strip() == "active" else "Installed (service not active)"
-        except:
-            openclaw_status = "Installation failed"
-
         rdp_user = self.rdp_username or "your-rdp-user"
+
+        try:
+            if self.agent_type == "hermes":
+                hermes_paths = self._hermes_command_paths(self.rdp_username or "root")
+                agent_status = "Installed" \
+                    if any(os.access(p, os.X_OK) for p in hermes_paths) else "Installation failed"
+            else:
+                agent_result = self.run_command("systemctl is-active openclaw", check=False)
+                agent_status = "Running" if agent_result.stdout.strip() == "active" else "Installed (service not active)"
+        except:
+            agent_status = "Installation failed"
 
         report = f"""
 {Colors.GREEN}{Colors.BOLD}UNIVERSAL VPS SETUP COMPLETED!{Colors.ENDC}
@@ -1933,8 +2058,8 @@ WantedBy=timers.target
 • Security: Locked down to Tailscale-only access
 
 {Colors.BOLD}Applications Installed:{Colors.ENDC}
-• OpenClaw AI: {openclaw_status}
-  {Colors.WARNING}→ Finish OpenClaw setup: run  openclaw onboard  (as {rdp_user}){Colors.ENDC}
+• {self.agent_label}: {agent_status}
+  {Colors.WARNING}→ Finish {self.agent_label} setup: run  {self.agent_onboard_cmd}  (as {rdp_user}){Colors.ENDC}
 • Google Chrome: {chrome_version}
 • Desktop shortcuts created for all users
 
@@ -1978,7 +2103,7 @@ WantedBy=timers.target
                     f"VPS setup completed successfully!\n\n"
                     f"Tailscale IP: {tailscale_ip}\n"
                     f"RDP user: {rdp_user}\n"
-                    f"OpenClaw: {openclaw_status}\n"
+                    f"{self.agent_label}: {agent_status}\n"
                     f"Chrome: Installed\n\n"
                     f"Applications are available on your desktop!"
                 )
@@ -2007,7 +2132,7 @@ WantedBy=timers.target
             if self._step_done("server_locked_down"):
                 print(f"\n{Colors.GREEN}Setup already complete — the server is locked down.{Colors.ENDC}")
                 print(f"{Colors.WARNING}RDP to {self.tailscale_ip}:3389 (user {self.rdp_username}). "
-                      f"Finish OpenClaw with: openclaw onboard{Colors.ENDC}")
+                      f"Finish {self.agent_label} with: {self.agent_onboard_cmd}{Colors.ENDC}")
                 return
 
             response = self.get_user_input(
@@ -2049,14 +2174,14 @@ WantedBy=timers.target
             if self.grd_needs_reboot:
                 print(f"\n{Colors.GREEN}{Colors.BOLD}  Setup complete — rebooting to activate remote desktop...{Colors.ENDC}")
                 print(f"{Colors.WARNING}  After ~1 minute, RDP to {Colors.BOLD}{self.tailscale_ip}:3389{Colors.ENDC}"
-                      f"{Colors.WARNING} as {self.rdp_username}, then run: openclaw onboard{Colors.ENDC}")
+                      f"{Colors.WARNING} as {self.rdp_username}, then run: {self.agent_onboard_cmd}{Colors.ENDC}")
                 sys.stdout.flush()
                 time.sleep(5)
                 self.run_command("systemctl reboot", check=False)
             else:
                 print(f"\n{Colors.GREEN}{Colors.BOLD}  Setup complete — server locked down to Tailscale-only.{Colors.ENDC}")
                 print(f"{Colors.WARNING}  Your SSH session may drop; reconnect over Tailscale.{Colors.ENDC}")
-                print(f"{Colors.WARNING}  RDP to {self.tailscale_ip}:3389 as {self.rdp_username}, then: openclaw onboard{Colors.ENDC}")
+                print(f"{Colors.WARNING}  RDP to {self.tailscale_ip}:3389 as {self.rdp_username}, then: {self.agent_onboard_cmd}{Colors.ENDC}")
 
         except KeyboardInterrupt:
             print(f"\n{Colors.WARNING}Setup interrupted by user{Colors.ENDC}")

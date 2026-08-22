@@ -2,7 +2,8 @@
 """
 Local Ubuntu 24.04 LTS Setup Script
 For physically-present desktop installs — configures xrdp, Tailscale,
-security lockdown, and installs OpenClaw + Chrome.
+security lockdown, and installs an AI agent (OpenClaw or Hermes Agent,
+via SECURECLAW_AGENT) + Chrome.
 
 Handles GNOME (Ubuntu default) and XFCE desktop environments.
 All setup runs in a single phase — no SSH disconnect or reconnect required.
@@ -53,6 +54,12 @@ class Colors:
 
 
 class LocalUbuntuSetup:
+    # AI agent choices — label for display, onboard_cmd for the manual
+    # follow-up step deferred by the non-interactive installer flags.
+    AGENT_INFO = {
+        "openclaw": {"label": "OpenClaw", "onboard_cmd": "openclaw onboard"},
+        "hermes":   {"label": "Hermes Agent", "onboard_cmd": "hermes setup"},
+    }
 
     def __init__(self):
         self.setup_log    = []
@@ -71,6 +78,42 @@ class LocalUbuntuSetup:
         self.rdp_backend  = state.get("rdp_backend")  # 'xrdp' or 'grd'
         self.rdp_password = None  # captured during user selection (grd needs it)
         self.grd_needs_reboot = False  # GRD activates only on a clean boot
+
+        # Which AI agent to install. SECURECLAW_AGENT (baked into the
+        # local-setup wrapper by the most recent install.sh run) takes
+        # priority over any previously-persisted choice, so re-running
+        # install.sh to pick a different agent after an interrupted attempt
+        # actually takes effect — UNLESS an agent has already actually been
+        # installed on this machine. Switching agents mid-lifecycle isn't
+        # supported: the security-check script, widget, and final report are
+        # each generated once behind their own _step_done() gate, so silently
+        # changing agent_type after that point would leave them permanently
+        # describing the wrong agent. Once installed, the choice sticks;
+        # persisted state is otherwise only the fallback — for a direct
+        # re-invocation of this script where the wrapper's env var is unset
+        # or invalid.
+        env_agent = os.environ.get("SECURECLAW_AGENT", "").strip().lower()
+        prior_agent = state.get("agent_type")
+        agent_already_installed = bool(state.get("openclaw_installed") or state.get("hermes_installed"))
+        if agent_already_installed and prior_agent not in self.AGENT_INFO:
+            # Machine was set up before agent_type existed in state — it can
+            # only have been OpenClaw (Hermes always saves agent_type).
+            prior_agent = "hermes" if state.get("hermes_installed") else "openclaw"
+
+        if agent_already_installed and prior_agent in self.AGENT_INFO:
+            self.agent_type = prior_agent
+            if env_agent in self.AGENT_INFO and env_agent != prior_agent:
+                print(f"{Colors.WARNING}Note: this machine already has "
+                      f"{self.AGENT_INFO[prior_agent]['label']} installed — ignoring the new "
+                      f"'{env_agent}' selection. Switching AI agents on an already-configured "
+                      f"machine isn't supported by this installer.{Colors.ENDC}")
+        elif env_agent in self.AGENT_INFO:
+            self.agent_type = env_agent
+        else:
+            self.agent_type = prior_agent if prior_agent in self.AGENT_INFO else "openclaw"
+        self._save_state(agent_type=self.agent_type)
+        self.agent_label = self.AGENT_INFO[self.agent_type]["label"]
+        self.agent_onboard_cmd = self.AGENT_INFO[self.agent_type]["onboard_cmd"]
 
     # ── State management ──────────────────────────────────────────────────────
 
@@ -348,7 +391,7 @@ class LocalUbuntuSetup:
             user = existing[0]
             print(f"\n{Colors.CYAN}Found existing user: {Colors.BOLD}{user}{Colors.ENDC}")
             choice = self.get_user_input(
-                "Install OpenClaw and desktop tools for this user?",
+                f"Install {self.agent_label} and desktop tools for this user?",
                 [f"Yes — use {user}", "Create a new user instead"],
                 default_index=0
             )
@@ -363,7 +406,7 @@ class LocalUbuntuSetup:
         elif len(existing) > 1:
             options = existing + ["Create a new user"]
             choice = self.get_user_input(
-                "Multiple users found. Which user should OpenClaw be installed for?",
+                f"Multiple users found. Which user should {self.agent_label} be installed for?",
                 options
             )
             if choice < len(existing):
@@ -643,6 +686,13 @@ only affects incoming network connections.{Colors.ENDC}
 
     # ── Applications ──────────────────────────────────────────────────────────
 
+    def install_agent(self):
+        """Install the selected AI agent (OpenClaw or Hermes Agent)."""
+        if self.agent_type == "hermes":
+            self.install_hermes()
+        else:
+            self.install_openclaw()
+
     def install_openclaw(self):
         if self._step_done("openclaw_installed"):
             self.log("OpenClaw already installed — skipping", "SUCCESS")
@@ -681,6 +731,52 @@ only affects incoming network connections.{Colors.ENDC}
         self.run_command(f"loginctl enable-linger {self.install_user}")
         self.log("OpenClaw installed and gateway service registered", "SUCCESS")
         self._save_state(openclaw_installed=True)
+
+    def _hermes_command_paths(self, install_user):
+        """Candidate locations for the `hermes` command, per the installer's
+        own resolve_install_layout(): FHS layout (/usr/local/bin) for a fresh
+        root install, ~/.local/bin otherwise — including a root install that
+        reused a pre-existing legacy checkout, which keeps the non-root-style
+        command dir even when running as root. Checking these paths directly
+        avoids depending on `su - user`'s login-shell PATH picking up
+        ~/.local/bin, which isn't guaranteed for every account/shell-rc
+        combination."""
+        if install_user == "root":
+            return ["/usr/local/bin/hermes", "/root/.local/bin/hermes"]
+        return [f"/home/{install_user}/.local/bin/hermes"]
+
+    def install_hermes(self):
+        if self._step_done("hermes_installed"):
+            self.log("Hermes Agent already installed — skipping", "SUCCESS")
+            return
+
+        print(f"\n{Colors.HEADER}=== HERMES AGENT INSTALLATION ==={Colors.ENDC}")
+
+        if not self.install_user:
+            self.log("No install user set — skipping Hermes Agent", "WARNING")
+            return
+
+        # Pre-install Node.js as root — Hermes' installer can manage its own,
+        # but a system Node avoids the extra download when it's new enough.
+        self.log("Installing Node.js and build tools...")
+        print(f"\n  {Colors.WARNING}{Colors.BOLD}⚠  Note:{Colors.ENDC}{Colors.WARNING} This step can take 2–3 minutes and may appear to hang.{Colors.ENDC}")
+        print(f"  {Colors.WARNING}   If progress stops, press Enter a few times to continue.{Colors.ENDC}\n")
+        self.plat.install_node("22")
+
+        # --skip-setup defers API-key / messaging-platform configuration to a
+        # later `hermes setup` run (parallels OpenClaw's --no-onboard);
+        # --non-interactive keeps optional prompts from blocking without a TTY.
+        self.log("Running official Hermes Agent installer...")
+        self.run_command(
+            f"su - {self.install_user} -c "
+            f"'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | "
+            f"bash -s -- --skip-setup --non-interactive'",
+            capture_output=False
+        )
+
+        self.run_command(f"loginctl enable-linger {self.install_user}")
+        self.log("Hermes Agent installed", "SUCCESS")
+        self._save_state(hermes_installed=True)
 
     def install_homebrew(self):
         """Pre-install Homebrew so OpenClaw skills install correctly during onboarding"""
@@ -830,6 +926,29 @@ WantedBy=timers.target
         # (ufw on Debian, firewalld on RHEL); shared with the VPS scripts.
         fw_check, fw_fix = self.plat.security_check_firewall_fragments()
 
+        if self.agent_type == "hermes":
+            hermes_test = " || ".join(
+                f'[ -x "{p}" ]' for p in self._hermes_command_paths(self.install_user or "root")
+            )
+            agent_check = f"""
+section "Hermes Agent"
+if {hermes_test}; then
+    pass "Hermes Agent is installed"
+    info "Manage the gateway (messaging/background service) with: hermes gateway install"
+else
+    warn "Hermes Agent does not appear to be installed"
+fi
+"""
+        else:
+            agent_check = r"""
+section "OpenClaw"
+if systemctl is-active --quiet openclaw; then
+    pass "OpenClaw service is running"
+else
+    warn "OpenClaw service is not running"; RESTART_SVCS+=("openclaw")
+fi
+"""
+
         # The security-check script itself is identical to the VPS version
         security_script = r"""#!/bin/bash
 # SecureClaw Security Verification
@@ -896,12 +1015,7 @@ else
     warn "RDP server does not appear to be listening on 3389"
 fi
 
-section "OpenClaw"
-if systemctl is-active --quiet openclaw; then
-    pass "OpenClaw service is running"
-else
-    warn "OpenClaw service is not running"; RESTART_SVCS+=("openclaw")
-fi
+""" + agent_check + r"""
 
 section "Services"
 for svc in @@RDP_SVC@@ tailscaled chrome-cleanup.timer; do
@@ -1118,7 +1232,7 @@ Categories=System;Security;
                 "url": "https://docs.openclaw.ai/tools/browser",
                 "icon": "text-html",
             },
-        ]
+        ] if self.agent_type == "openclaw" else []
 
         for user_dir in _real_user_homes():
             username = user_dir.name
@@ -1189,10 +1303,15 @@ Categories=System;Security;
             chrome_ver = "Installation failed"
 
         try:
-            r = self.run_command("systemctl is-active openclaw", check=False)
-            oc_status = "Running" if r.stdout.strip() == "active" else "Installed (service not active)"
+            if self.agent_type == "hermes":
+                hermes_paths = self._hermes_command_paths(self.install_user or "root")
+                agent_status = "Installed" \
+                    if any(os.access(p, os.X_OK) for p in hermes_paths) else "Installation failed"
+            else:
+                r = self.run_command("systemctl is-active openclaw", check=False)
+                agent_status = "Running" if r.stdout.strip() == "active" else "Installed (service not active)"
         except Exception:
-            oc_status = "Unknown"
+            agent_status = "Unknown"
 
         rdp_label = ("GNOME Remote Desktop" if self.rdp_backend == "grd"
                      else "xrdp (remote desktop server)")
@@ -1209,7 +1328,7 @@ Categories=System;Security;
 
 {Colors.BOLD}Installed:{Colors.ENDC}
 • {rdp_label}
-• OpenClaw AI: {oc_status}
+• {self.agent_label}: {agent_status}
 • Google Chrome: {chrome_ver}
 
 {Colors.FAIL}{Colors.BOLD}╔══════════════════════════════════════════════════════════════╗
@@ -1231,7 +1350,7 @@ Categories=System;Security;
 1. {Colors.BOLD}Disable Tailscale key expiry{Colors.ENDC} (see above — do this first!)
 2. Install Tailscale on your other devices (tailscale.com/download)
    Sign in with the same account to reach this machine remotely
-3. Run OpenClaw onboarding: {Colors.BOLD}openclaw onboard{Colors.ENDC}
+3. Run {self.agent_label} onboarding: {Colors.BOLD}{self.agent_onboard_cmd}{Colors.ENDC}
 4. RDP into this machine from any Tailscale device:
    Address: {Colors.BOLD}{tailscale_ip}:3389{Colors.ENDC}
 
@@ -1258,8 +1377,11 @@ Categories=System;Security;
         print("  • Configure xrdp for remote desktop access")
         print("  • Install and authenticate Tailscale VPN")
         print("  • Apply Tailscale-only firewall rules")
-        print("  • Install OpenClaw AI and Google Chrome")
-        print("  • Set up desktop shortcuts and the Control Panel widget")
+        print(f"  • Install {self.agent_label} and Google Chrome")
+        if self.agent_type == "openclaw":
+            print("  • Set up desktop shortcuts and the Control Panel widget")
+        else:
+            print("  • Set up desktop shortcuts")
         print()
 
         if os.geteuid() != 0:
@@ -1280,7 +1402,7 @@ Categories=System;Security;
         state = self._load_state()
         completed = [
             k for k, v in state.items()
-            if v and k not in ("desktop_type", "install_user", "tailscale_ip")
+            if v and k not in ("desktop_type", "install_user", "tailscale_ip", "agent_type")
         ]
         if completed:
             print(f"\n{Colors.GREEN}Resuming — steps already completed:{Colors.ENDC}")
@@ -1301,12 +1423,14 @@ Categories=System;Security;
             else:
                 print(f"{Colors.WARNING}Continuing without Tailscale / firewall lockdown.{Colors.ENDC}")
 
-            self.install_openclaw()
-            self.install_homebrew()
+            self.install_agent()
+            if self.agent_type == "openclaw":
+                self.install_homebrew()
             self.install_chrome()
             self.install_chrome_cleanup()
             self.install_security_check()
-            self.install_openclaw_widget()
+            if self.agent_type == "openclaw":
+                self.install_openclaw_widget()
             self.create_user_shortcuts()
             self.create_final_report()
 

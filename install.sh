@@ -150,6 +150,31 @@ detect_mode() {
     esac
 }
 
+# ── Agent selection ───────────────────────────────────────────────────────────
+# Sets AGENT_TYPE="openclaw" or "hermes". Threaded through to the Python setup
+# scripts via SECURECLAW_AGENT so the RDP/Tailscale/firewall pipeline stays
+# shared and only the AI-agent install step branches.
+detect_agent() {
+    echo
+    print_divider
+    echo
+    echo -e "  ${CYAN}${BOLD}Select AI agent to install:${RESET}"
+    echo
+    echo -e "  ${CYAN}  1.${RESET}  ${BOLD}OpenClaw${RESET}"
+    echo -e "       ${DIM}openclaw.ai${RESET}"
+    echo -e "  ${CYAN}  2.${RESET}  ${BOLD}Hermes Agent${RESET}"
+    echo -e "       ${DIM}Nous Research — hermes-agent.nousresearch.com${RESET}"
+    echo
+
+    read -rp "  Enter choice [1]: " agent_choice
+    agent_choice="${agent_choice:-1}"
+
+    case "$agent_choice" in
+        2) AGENT_TYPE="hermes"   ;;
+        *) AGENT_TYPE="openclaw" ;;
+    esac
+}
+
 # ── Steps ─────────────────────────────────────────────────────────────────────
 install_python() {
     print_step 2 4 "Installing Python and dependencies...    "
@@ -240,6 +265,7 @@ curl -fsSL "\$REPO_BASE/ubuntu/universal_vps_setup.py?\$(date +%s)" -o /usr/loca
     && chmod +x /usr/local/bin/universal_vps_setup.py \
     || echo "  Warning: could not fetch latest script, running cached version"
 export SECURECLAW_BRANCH="${BRANCH}"
+export SECURECLAW_AGENT="${AGENT_TYPE}"
 python3 /usr/local/bin/universal_vps_setup.py "\$@"
 EOF
 
@@ -253,6 +279,7 @@ if curl -fsSL "\$REPO_BASE/ubuntu/post_lockdown_setup.py?\$(date +%s)" -o /usr/l
 else
     echo "  Warning: could not fetch latest script, running cached version"
 fi
+export SECURECLAW_AGENT="${AGENT_TYPE}"
 python3 /usr/local/bin/post_lockdown_setup.py "\$@"
 EOF
 
@@ -266,6 +293,7 @@ else
     echo "  Warning: could not fetch latest script, running cached version"
 fi
 export SECURECLAW_BRANCH="${BRANCH}"
+export SECURECLAW_AGENT="${AGENT_TYPE}"
 python3 /usr/local/bin/local_setup.py "\$@"
 EOF
 
@@ -276,6 +304,14 @@ EOF
 }
 
 show_complete() {
+    if [[ "$AGENT_TYPE" == "hermes" ]]; then
+        AGENT_LABEL="Hermes Agent"
+        AGENT_ONBOARD_CMD="hermes setup"
+    else
+        AGENT_LABEL="OpenClaw AI assistant"
+        AGENT_ONBOARD_CMD="openclaw onboard"
+    fi
+
     if [[ "$SETUP_MODE" == "local" ]]; then
         show_complete_local
     else
@@ -293,7 +329,7 @@ show_complete_vps() {
     echo -e "  ${GREEN}  ✓${RESET}  Remote Desktop (RDP) access"
     echo -e "  ${GREEN}  ✓${RESET}  A dedicated user account with sudo access"
     echo -e "  ${GREEN}  ✓${RESET}  Tailscale VPN — secure remote access from anywhere"
-    echo -e "  ${GREEN}  ✓${RESET}  OpenClaw AI assistant — running as a background service"
+    echo -e "  ${GREEN}  ✓${RESET}  ${AGENT_LABEL} — running as a background service"
     echo -e "  ${GREEN}  ✓${RESET}  Google Chrome browser"
     echo
     print_divider
@@ -304,9 +340,9 @@ show_complete_vps() {
     echo -e "  ${CYAN}  2.${RESET}  You will create your RDP login username and password"
     echo -e "  ${CYAN}  3.${RESET}  You will be asked to authenticate Tailscale"
     echo -e "       ${DIM}(a link will appear — open it in your browser)${RESET}"
-    echo -e "  ${CYAN}  4.${RESET}  Everything installs in a single pass — OpenClaw, Chrome, lockdown"
+    echo -e "  ${CYAN}  4.${RESET}  Everything installs in a single pass — ${AGENT_LABEL}, Chrome, lockdown"
     echo -e "  ${CYAN}  5.${RESET}  The server locks down (and reboots if needed); reconnect over"
-    echo -e "       ${DIM}Tailscale and RDP in, then run: openclaw onboard${RESET}"
+    echo -e "       ${DIM}Tailscale and RDP in, then run: ${AGENT_ONBOARD_CMD}${RESET}"
     echo
     print_divider
     echo
@@ -322,7 +358,7 @@ show_complete_local() {
     echo -e "  ${GREEN}  ✓${RESET}  xrdp — remote desktop access via Tailscale"
     echo -e "  ${GREEN}  ✓${RESET}  Tailscale VPN — reach this machine from anywhere"
     echo -e "  ${GREEN}  ✓${RESET}  Tailscale-only firewall rules (SSH + RDP)"
-    echo -e "  ${GREEN}  ✓${RESET}  OpenClaw AI assistant — running as a background service"
+    echo -e "  ${GREEN}  ✓${RESET}  ${AGENT_LABEL} — running as a background service"
     echo -e "  ${GREEN}  ✓${RESET}  Google Chrome browser"
     echo
     print_divider
@@ -355,6 +391,7 @@ main() {
     fi
 
     detect_mode
+    detect_agent
 
     print_divider
     echo
