@@ -74,8 +74,8 @@ fi
 echo "[2/7] Downloading openclaw-widget..."
 # platform_support.py must sit beside the widget — it imports it to choose the
 # firewall command (ufw vs firewall-cmd).
-wget -q -O /usr/local/bin/platform_support.py "${RAW_BASE}/ubuntu/platform_support.py" || true
-wget -q -O "$INSTALL_BIN" "${RAW_BASE}/ubuntu/openclaw_widget.py"
+wget -q -O /usr/local/bin/platform_support.py "${RAW_BASE}/ubuntu/platform_support.py?$(date +%s)" || true
+wget -q -O "$INSTALL_BIN" "${RAW_BASE}/ubuntu/openclaw_widget.py?$(date +%s)"
 chmod +x "$INSTALL_BIN"
 # Inject branch so widget can fetch manifest from the correct branch at runtime
 sed -i "s/^REPO_BRANCH_OVERRIDE = None.*$/REPO_BRANCH_OVERRIDE = \"${BRANCH}\"/" "$INSTALL_BIN"

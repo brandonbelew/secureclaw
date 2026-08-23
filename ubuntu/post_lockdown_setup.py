@@ -645,7 +645,7 @@ WantedBy=timers.target
         install_bin = "/usr/local/bin/openclaw-widget"
 
         # Download widget script
-        self.run_command(f"wget -q -O {install_bin} {widget_url}")
+        self.run_command(f'wget -q -O {install_bin} "{widget_url}?$(date +%s)"')
         os.chmod(install_bin, 0o755)
         # Inject branch so widget fetches manifest from the correct branch at runtime
         self.run_command(

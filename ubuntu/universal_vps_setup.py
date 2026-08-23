@@ -1405,7 +1405,7 @@ TAILSCALE TROUBLESHOOTING:
         raw_base = f"https://raw.githubusercontent.com/brandonbelew/secureclaw/{branch}"
         install_bin = "/usr/local/bin/openclaw-widget"
 
-        self.run_command(f"wget -q -O {install_bin} {raw_base}/ubuntu/openclaw_widget.py")
+        self.run_command(f'wget -q -O {install_bin} "{raw_base}/ubuntu/openclaw_widget.py?$(date +%s)"')
         os.chmod(install_bin, 0o755)
         self.run_command(
             f"sed -i 's/^REPO_BRANCH_OVERRIDE = None.*$/REPO_BRANCH_OVERRIDE = \"{branch}\"/' {install_bin}"
