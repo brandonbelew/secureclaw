@@ -15,10 +15,27 @@ DESKTOP_DIR="/usr/local/share/applications"
 SUDOERS_FILE="/etc/sudoers.d/openclaw-widget"
 
 # Which agent's branding to show in the desktop entry / banner. Mirrors
-# detect_agent() in openclaw_widget.py (prefer hermes if found and openclaw
-# isn't); the widget itself re-detects at launch regardless, so this only
-# affects the static Name=/Comment= text and this script's own output.
-if command -v hermes &>/dev/null && ! command -v openclaw &>/dev/null; then
+# detect_agent()/find_hermes_binary() in openclaw_widget.py; the widget
+# itself re-detects at launch regardless, so this only affects the static
+# Name=/Comment= text and this script's own output.
+#
+# This script runs as root (sudo), but the agent is typically installed for
+# a separate non-root RDP/admin user — so `command -v hermes` as root alone
+# is unreliable (root's PATH never includes another user's ~/.local/bin).
+# Check the known install locations directly, across every real user home,
+# same as the Python setup scripts do.
+_agent_binary_exists() {
+    local bin_name="$1"
+    [[ -x "/usr/local/bin/${bin_name}" ]] && return 0
+    command -v "$bin_name" &>/dev/null && return 0
+    local user_dir
+    for user_dir in /home/*/; do
+        [[ -x "${user_dir}.local/bin/${bin_name}" ]] && return 0
+    done
+    return 1
+}
+
+if _agent_binary_exists hermes && ! _agent_binary_exists openclaw; then
     AGENT_LABEL="Hermes Agent"
 else
     AGENT_LABEL="OpenClaw"
