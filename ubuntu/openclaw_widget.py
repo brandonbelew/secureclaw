@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-OpenClaw Control Panel Widget
-GTK3 desktop widget for OpenClaw service status and quick actions.
+AI Agent Control Panel Widget
+GTK3 desktop widget for OpenClaw/Hermes Agent service status and quick actions.
+Self-detects which agent is installed (see detect_agent()) and adapts.
 """
 
 import base64
@@ -76,6 +77,64 @@ def _is_rhel_family():
 
 
 IS_RHEL = _is_rhel_family()
+
+
+def find_hermes_binary():
+    """Absolute path to the `hermes` command, checked directly rather than
+    via PATH lookup. The widget launches from a non-login XDG autostart
+    entry (Exec=..., Terminal=false), whose PATH isn't guaranteed to include
+    ~/.local/bin — where a non-root Hermes install places the command (per
+    its own resolve_install_layout(); /usr/local/bin for a root/FHS
+    install). Falls back to a PATH lookup as a last resort. Returns None if
+    Hermes isn't found by either method."""
+    home = str(Path.home())
+    for candidate in ("/usr/local/bin/hermes", f"{home}/.local/bin/hermes"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    stdout, _, rc = run_command("command -v hermes", timeout=5)
+    return stdout if rc == 0 and stdout else None
+
+
+def detect_agent(hermes_bin):
+    """Which AI agent this widget should monitor. Prefers Hermes if its
+    binary was found (see find_hermes_binary()) and OpenClaw's isn't;
+    defaults to openclaw otherwise."""
+    _, _, openclaw_rc = run_command("command -v openclaw", timeout=5)
+    if hermes_bin and openclaw_rc != 0:
+        return "hermes"
+    return "openclaw"
+
+
+# Per-agent display text and command surface. Hermes commands verified
+# against https://hermes-agent.nousresearch.com/docs/reference/cli-commands
+# (not guessed) — `hermes gateway status`, `hermes --version`, and
+# `hermes update` (including its documented `--check` "preview without
+# installing" flag) are all real, documented subcommands. Hermes has no
+# local HTTP dashboard like OpenClaw's, so "Open Dashboard" becomes "Open
+# Desktop App" (launches the `hermes desktop` Electron app), and "Start
+# Browser" (no direct Hermes
+# equivalent) becomes "Configure Tools" (`hermes tools`).
+AGENT_META = {
+    "openclaw": {
+        "label": "OpenClaw",
+        "window_title": "OpenClaw Control Panel",
+        "service_card_name": "OpenClaw Service",
+        "dash_label": "Open Dashboard",
+        "browser_label": "Start Browser",
+        "browser_sub": "Start the OpenClaw managed browser",
+        "update_sub": "Checks openclaw update status",
+    },
+    "hermes": {
+        "label": "Hermes Agent",
+        "window_title": "Hermes Agent Control Panel",
+        "service_card_name": "Hermes Gateway",
+        "dash_label": "Open Desktop App",
+        "dash_sub": "Launch the Hermes desktop app",
+        "browser_label": "Configure Tools",
+        "browser_sub": "Open hermes tools in a terminal",
+        "update_sub": "Checks hermes update status",
+    },
+}
 
 DARK_CSS = """
 window {
@@ -354,16 +413,19 @@ class StatusCard:
         return True
 
 
-class OpenClawWidget(Gtk.Window):
+class AgentWidget(Gtk.Window):
 
     def __init__(self):
-        super().__init__(title="OpenClaw Control Panel")
+        self.hermes_bin = find_hermes_binary()
+        self.agent = detect_agent(self.hermes_bin)
+        self.meta = AGENT_META[self.agent]
+        super().__init__(title=self.meta["window_title"])
         self.set_default_size(420, -1)
         self.set_resizable(False)
         self.set_position(Gtk.WindowPosition.CENTER)
 
         self.branch = get_repo_branch()
-        self.port = get_dashboard_port()
+        self.port = get_dashboard_port() if self.agent == "openclaw" else DEFAULT_PORT
         self.tools_data = []
         self._tool_rows = {}
 
@@ -423,7 +485,7 @@ class OpenClawWidget(Gtk.Window):
         box.pack_start(logo_img, False, False, 0)
 
         text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        title = Gtk.Label(label="OpenClaw Control Panel")
+        title = Gtk.Label(label=self.meta["window_title"])
         title.get_style_context().add_class("title-label")
         title.set_halign(Gtk.Align.START)
         text_box.pack_start(title, False, False, 0)
@@ -454,7 +516,7 @@ class OpenClawWidget(Gtk.Window):
         grid = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         wrapper.pack_start(grid, False, False, 0)
 
-        self.card_service = StatusCard("OpenClaw Service")
+        self.card_service = StatusCard(self.meta["service_card_name"])
         self.card_tailscale = StatusCard("Tailscale VPN")
         self.card_firewall = StatusCard("Firewall Rules")
 
@@ -490,20 +552,22 @@ class OpenClawWidget(Gtk.Window):
         lbl.set_halign(Gtk.Align.START)
         wrapper.pack_start(lbl, False, False, 0)
 
-        # Open Dashboard
+        # Open Dashboard (OpenClaw) / Open Desktop App (Hermes)
+        dash_sub = (self.meta["dash_sub"] if self.agent == "hermes"
+                    else f"http://127.0.0.1:{self.port}/")
         dash_row = self._make_action_row(
-            "Open Dashboard",
-            f"http://127.0.0.1:{self.port}/",
+            self.meta["dash_label"],
+            dash_sub,
             self._on_open_dashboard,
             icon_pixbuf=self.logo_pixbuf_24
         )
         self.dash_sublabel = dash_row[1]
         wrapper.pack_start(dash_row[0], False, False, 0)
 
-        # Start Browser
+        # Start Browser (OpenClaw) / Configure Tools (Hermes)
         plugin_row = self._make_action_row(
-            "Start Browser",
-            "Start the OpenClaw managed browser",
+            self.meta["browser_label"],
+            self.meta["browser_sub"],
             self._on_install_plugin,
             icon_pixbuf=self.logo_pixbuf_24
         )
@@ -513,7 +577,7 @@ class OpenClawWidget(Gtk.Window):
         # Check for Updates
         update_row = self._make_action_row(
             "Check for Updates",
-            "Checks openclaw update status",
+            self.meta["update_sub"],
             self._on_check_updates,
             icon_pixbuf=self.logo_pixbuf_24
         )
@@ -707,8 +771,9 @@ class OpenClawWidget(Gtk.Window):
         self.refresh_time_label.set_text(f"⟳ Refreshed {now}")
         self.uptime_label.set_markup(f'<span foreground="#4caf50">{uptime}</span>')
 
-        self.port = get_dashboard_port()
-        self.dash_sublabel.set_text(f"http://127.0.0.1:{self.port}/")
+        if self.agent == "openclaw":
+            self.port = get_dashboard_port()
+            self.dash_sublabel.set_text(f"http://127.0.0.1:{self.port}/")
 
         self.tools_data = tools or []
         self._update_tools_ui(self.tools_data)
@@ -718,6 +783,8 @@ class OpenClawWidget(Gtk.Window):
     # ── Individual Checks ─────────────────────────────────────────────────────
 
     def _check_service(self):
+        if self.agent == "hermes":
+            return self._check_service_hermes()
         stdout, _, rc = run_command(
             "systemctl --user is-active openclaw-gateway", timeout=8
         )
@@ -727,6 +794,25 @@ class OpenClawWidget(Gtk.Window):
             return "red", stdout or "inactive"
         else:
             return "red", "not running"
+
+    def _check_service_hermes(self):
+        if not self.hermes_bin:
+            return "yellow", "not installed"
+        # `hermes gateway status` is a real subcommand ("Show service
+        # status" per Hermes's own CLI reference), but its exact output text
+        # isn't documented — parse defensively by keyword rather than an
+        # exact match. The gateway is optional (only needed for messaging
+        # platforms), so "not running" is a normal, not-broken state. An
+        # unrecognized output format is reported as "unknown" (yellow)
+        # rather than guessed as "not running" (red) — we'd rather admit
+        # uncertainty than falsely flag a healthy gateway as broken.
+        stdout, stderr, rc = run_command(f"{self.hermes_bin} gateway status", timeout=8)
+        combined = f"{stdout} {stderr}".lower()
+        if "not running" in combined or "stopped" in combined or "inactive" in combined:
+            return "red", "not running"
+        if "running" in combined or "active" in combined:
+            return "green", "running"
+        return "yellow", "unknown"
 
     def _check_tailscale(self):
         """Returns (led_state, status_text, ip_host_text, expiry_markup)."""
@@ -795,10 +881,17 @@ class OpenClawWidget(Gtk.Window):
         return "red", "inactive"
 
     def _get_version(self):
-        stdout, _, rc = run_command("openclaw -V", timeout=8)
+        fallback = self.agent
+        if self.agent == "hermes":
+            if not self.hermes_bin:
+                return fallback
+            cmd = f"{self.hermes_bin} --version"
+        else:
+            cmd = "openclaw -V"
+        stdout, _, rc = run_command(cmd, timeout=8)
         if rc == 0 and stdout:
-            return stdout.split()[0] if stdout else "openclaw"
-        return "openclaw"
+            return stdout.split()[0] if stdout else fallback
+        return fallback
 
     def _get_uptime(self):
         stdout, _, rc = run_command("uptime -p", timeout=5)
@@ -821,11 +914,36 @@ class OpenClawWidget(Gtk.Window):
     # ── Action Handlers ───────────────────────────────────────────────────────
 
     def _on_open_dashboard(self, button):
+        if self.agent == "hermes":
+            if not self.hermes_bin:
+                return
+            # `hermes desktop` is a long-running Electron app — launch it
+            # detached so it isn't killed by run_command()'s timeout.
+            try:
+                subprocess.Popen(
+                    [self.hermes_bin, "desktop"], start_new_session=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            except Exception:
+                pass
+            return
         self.port = get_dashboard_port()
         url = f"http://127.0.0.1:{self.port}/"
         run_command(f"xdg-open {url!r}")
 
     def _on_install_plugin(self, button):
+        if self.agent == "hermes":
+            if not self.hermes_bin:
+                return
+            # `hermes tools` is an interactive terminal wizard, not a
+            # fire-and-forget command — open it in a terminal like the
+            # tool-install action below, rather than the OpenClaw
+            # background-thread + result-dialog flow.
+            run_command(
+                "xfce4-terminal --title='Hermes Tools' "
+                f"--command='bash -c \"{self.hermes_bin!r} tools; echo; echo Done -- press Enter; read\"'"
+            )
+            return
         button.set_sensitive(False)
         self.plugin_sublabel.set_text("Starting...")
 
@@ -836,11 +954,15 @@ class OpenClawWidget(Gtk.Window):
         threading.Thread(target=do_start, daemon=True).start()
 
     def _show_browser_dialog(self, button, rc):
-        self.plugin_sublabel.set_text("Start the OpenClaw managed browser")
+        # Only reached via the OpenClaw branch of _on_install_plugin — Hermes
+        # returns early into a terminal-based flow instead. Still uses
+        # self.meta rather than hardcoded OpenClaw text so this stays correct
+        # if that branch is ever restructured.
+        self.plugin_sublabel.set_text(self.meta["browser_sub"])
         button.set_sensitive(True)
 
         dialog = Gtk.Dialog(
-            title="Start Browser",
+            title=self.meta["browser_label"],
             transient_for=self,
             modal=True
         )
@@ -851,7 +973,7 @@ class OpenClawWidget(Gtk.Window):
         dialog.get_content_area().set_margin_top(12)
         dialog.get_content_area().set_margin_bottom(12)
 
-        msg = "Browser started." if rc == 0 else "Browser start returned an error. Check openclaw status."
+        msg = "Browser started." if rc == 0 else f"Browser start returned an error. Check {self.agent} status."
         lbl = Gtk.Label(label=msg)
         lbl.set_line_wrap(True)
         lbl.set_halign(Gtk.Align.START)
@@ -869,7 +991,14 @@ class OpenClawWidget(Gtk.Window):
         self.update_sublabel.set_text("Checking...")
 
         def do_check():
-            stdout, stderr, rc = run_command("openclaw update status", timeout=30)
+            if self.agent == "hermes":
+                if not self.hermes_bin:
+                    GLib.idle_add(self._show_update_dialog, button, "Hermes Agent not found.")
+                    return
+                cmd = f"{self.hermes_bin} update --check"
+            else:
+                cmd = "openclaw update status"
+            stdout, stderr, rc = run_command(cmd, timeout=30)
             result = stdout or stderr or "No output from update check."
             GLib.idle_add(self._show_update_dialog, button, result)
 
@@ -891,7 +1020,7 @@ class OpenClawWidget(Gtk.Window):
             modal=True,
             message_type=Gtk.MessageType.INFO,
             buttons=Gtk.ButtonsType.NONE,
-            text="OpenClaw Update Status"
+            text=f"{self.meta['label']} Update Status"
         )
         dialog.format_secondary_text(result)
         dialog.add_button("Dismiss", Gtk.ResponseType.CLOSE)
@@ -903,10 +1032,18 @@ class OpenClawWidget(Gtk.Window):
         dialog.destroy()
 
         if response == Gtk.ResponseType.ACCEPT:
-            run_command(
-                "xfce4-terminal --title='OpenClaw Update' "
-                "--command='bash -c \"openclaw update; echo; echo Done -- press Enter; read\"'"
-            )
+            if self.agent == "hermes":
+                if not self.hermes_bin:
+                    return False
+                run_command(
+                    "xfce4-terminal --title='Hermes Update' "
+                    f"--command='bash -c \"{self.hermes_bin!r} update; echo; echo Done -- press Enter; read\"'"
+                )
+            else:
+                run_command(
+                    "xfce4-terminal --title='OpenClaw Update' "
+                    "--command='bash -c \"openclaw update; echo; echo Done -- press Enter; read\"'"
+                )
         return False
 
     def _on_install_tool(self, tool):
@@ -927,7 +1064,7 @@ class OpenClawWidget(Gtk.Window):
 
 
 def main():
-    widget = OpenClawWidget()
+    widget = AgentWidget()
     widget.show_all()
     Gtk.main()
 

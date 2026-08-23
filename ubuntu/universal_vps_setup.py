@@ -1389,13 +1389,17 @@ TAILSCALE TROUBLESHOOTING:
             pass
         return "main"
 
-    def install_openclaw_widget(self):
-        """Install the OpenClaw Control Panel desktop widget."""
+    def install_agent_widget(self):
+        """Install the AI agent control-panel desktop widget. The widget
+        (openclaw_widget.py) self-detects which agent is installed at
+        runtime and adapts its labels/commands accordingly — it's shared
+        between OpenClaw and Hermes, only the install artifact names
+        (openclaw-widget) stay as-is."""
         if self._step_done("widget_installed"):
-            self.log("OpenClaw widget already installed — skipping", "SUCCESS")
+            self.log("Control panel widget already installed — skipping", "SUCCESS")
             return
 
-        print(f"\n{Colors.HEADER}=== OPENCLAW CONTROL PANEL ==={Colors.ENDC}")
+        print(f"\n{Colors.HEADER}=== {self.agent_label.upper()} CONTROL PANEL ==={Colors.ENDC}")
         branch = self._get_repo_branch()
         self.log(f"Using branch: {branch}")
         raw_base = f"https://raw.githubusercontent.com/brandonbelew/secureclaw/{branch}"
@@ -1422,8 +1426,8 @@ TAILSCALE TROUBLESHOOTING:
         app_dir.mkdir(parents=True, exist_ok=True)
         desktop_content = (
             "[Desktop Entry]\n"
-            "Name=OpenClaw Control Panel\n"
-            "Comment=OpenClaw service status and launcher\n"
+            f"Name={self.agent_label} Control Panel\n"
+            f"Comment={self.agent_label} service status and launcher\n"
             "Exec=/usr/local/bin/openclaw-widget\n"
             "Icon=network-server\n"
             "Terminal=false\n"
@@ -1448,7 +1452,7 @@ TAILSCALE TROUBLESHOOTING:
             self.run_command(f"chown {username}:{username} {shortcut}")
             self.log(f"Autostart + desktop shortcut created for {username}", "SUCCESS")
 
-        self.log("OpenClaw Control Panel installed", "SUCCESS")
+        self.log(f"{self.agent_label} Control Panel installed", "SUCCESS")
         self._save_state(widget_installed=True)
 
     def install_applications(self):
@@ -1462,8 +1466,7 @@ TAILSCALE TROUBLESHOOTING:
         self.install_chrome()
         self.install_chrome_cleanup()
         self.install_security_check()
-        if self.agent_type == "openclaw":
-            self.install_openclaw_widget()
+        self.install_agent_widget()
         self.create_user_shortcuts()
 
     def install_agent(self):

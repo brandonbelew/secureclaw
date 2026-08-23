@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# install_widget.sh — Standalone OpenClaw Control Panel installer
+# install_widget.sh — Standalone AI agent Control Panel installer
+# Installs openclaw-widget, which self-detects OpenClaw vs Hermes Agent at
+# runtime (see detect_agent() in openclaw_widget.py) and adapts.
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/brandonbelew/secureclaw/main/ubuntu/install_widget.sh | sudo bash
 #   curl -fsSL https://raw.githubusercontent.com/brandonbelew/secureclaw/dev/ubuntu/install_widget.sh  | sudo bash -s -- dev
@@ -11,6 +13,16 @@ REPO_NAME="secureclaw"
 INSTALL_BIN="/usr/local/bin/openclaw-widget"
 DESKTOP_DIR="/usr/local/share/applications"
 SUDOERS_FILE="/etc/sudoers.d/openclaw-widget"
+
+# Which agent's branding to show in the desktop entry / banner. Mirrors
+# detect_agent() in openclaw_widget.py (prefer hermes if found and openclaw
+# isn't); the widget itself re-detects at launch regardless, so this only
+# affects the static Name=/Comment= text and this script's own output.
+if command -v hermes &>/dev/null && ! command -v openclaw &>/dev/null; then
+    AGENT_LABEL="Hermes Agent"
+else
+    AGENT_LABEL="OpenClaw"
+fi
 
 # ── Detect branch ──────────────────────────────────────────────────────────────
 detect_branch() {
@@ -79,10 +91,10 @@ chmod 440 "$SUDOERS_FILE"
 # ── System-wide .desktop file ──────────────────────────────────────────────────
 echo "[4/7] Installing application menu entry..."
 mkdir -p "$DESKTOP_DIR"
-cat > "${DESKTOP_DIR}/openclaw-widget.desktop" <<'EOF'
+cat > "${DESKTOP_DIR}/openclaw-widget.desktop" <<EOF
 [Desktop Entry]
-Name=OpenClaw Control Panel
-Comment=OpenClaw service status and launcher
+Name=${AGENT_LABEL} Control Panel
+Comment=${AGENT_LABEL} service status and launcher
 Exec=/usr/local/bin/openclaw-widget
 Icon=network-server
 Terminal=false
@@ -96,8 +108,8 @@ EOF
 echo "[5/7] Creating per-user autostart and desktop entries..."
 
 DESKTOP_CONTENT="[Desktop Entry]
-Name=OpenClaw Control Panel
-Comment=OpenClaw service status and launcher
+Name=${AGENT_LABEL} Control Panel
+Comment=${AGENT_LABEL} service status and launcher
 Exec=/usr/local/bin/openclaw-widget
 Icon=network-server
 Terminal=false
@@ -134,7 +146,7 @@ update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 echo "[7/7] Done!"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " OpenClaw Control Panel installed successfully!"
+echo " ${AGENT_LABEL} Control Panel installed successfully!"
 echo ""
 echo " To launch now:       openclaw-widget &"
 echo " Auto-starts on:      next RDP session login"
