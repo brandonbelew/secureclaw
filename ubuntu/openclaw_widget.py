@@ -9,6 +9,8 @@ import base64
 from datetime import datetime, timezone
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -160,9 +162,12 @@ def detect_agent(hermes_bin):
 # `hermes update` (including its documented `--check` "preview without
 # installing" flag) are all real, documented subcommands. Hermes has no
 # local HTTP dashboard like OpenClaw's, so "Open Dashboard" becomes "Open
-# Desktop App" (launches the `hermes desktop` Electron app), and "Start
-# Browser" (no direct Hermes
-# equivalent) becomes "Configure Tools" (`hermes tools`).
+# Hermes Chat" — the bare `hermes` interactive TUI, opened in a terminal.
+# (`hermes desktop`, the Electron app, was considered too, but it's only
+# built when Hermes is installed with --include-desktop, which our headless
+# install deliberately doesn't pass, so it's never actually present.)
+# "Start Browser" (no direct Hermes equivalent) becomes "Configure Tools"
+# (`hermes tools`).
 AGENT_META = {
     "openclaw": {
         "label": "OpenClaw",
@@ -178,8 +183,8 @@ AGENT_META = {
         "label": "Hermes Agent",
         "window_title": "Hermes Agent Control Panel",
         "service_card_name": "Hermes Gateway",
-        "dash_label": "Open Desktop App",
-        "dash_sub": "Launch the Hermes desktop app",
+        "dash_label": "Open Hermes Chat",
+        "dash_sub": "Open the interactive Hermes chat in a terminal",
         "browser_label": "Configure Tools",
         "browser_sub": "Open hermes tools in a terminal",
         "update_sub": "Checks hermes update status",
@@ -390,6 +395,95 @@ def run_command(cmd, shell=True, timeout=10):
         return "", "timeout", 1
     except Exception as e:
         return "", str(e), 1
+
+
+# Terminal emulators to try, in priority order, for launching an interactive
+# command in a new window. The desktop environment varies by RDP backend:
+# xrdp always forces an XFCE session (xfce4-terminal available) even on a
+# GNOME box, but GNOME Remote Desktop systems (Rocky/RHEL 10, which has no
+# X.Org and so no xrdp/XFCE at all — see detect_and_setup_desktop()) don't
+# have XFCE at all, and even within GNOME the default terminal app varies by
+# version (gnome-terminal vs. the newer GNOME Console/kgx), so several GNOME
+# candidates are listed. Each entry is (binary, argv-builder) since terminals
+# don't share a CLI contract: xfce4-terminal and kgx each want a single
+# --command= string they re-parse themselves (kgx has no --title option at
+# all — verified against its actual manpage, not guessed), while
+# gnome-terminal/konsole/x-terminal-emulator take the command as literal
+# trailing argv after a separator.
+_TERMINAL_CANDIDATES = [
+    ("xfce4-terminal", lambda title, bash_c: (
+        f"xfce4-terminal --title={shlex.quote(title)} --command={shlex.quote(bash_c)}"
+    )),
+    ("gnome-terminal", lambda title, bash_c: (
+        f"gnome-terminal --title={shlex.quote(title)} -- {bash_c}"
+    )),
+    ("kgx", lambda title, bash_c: (  # GNOME Console — replaces gnome-terminal on newer GNOME
+        f"kgx --command={shlex.quote(bash_c)}"  # no --title option exists
+    )),
+    ("konsole", lambda title, bash_c: (
+        f"konsole --title {shlex.quote(title)} -e {bash_c}"
+    )),
+    ("x-terminal-emulator", lambda title, bash_c: (
+        f"x-terminal-emulator -T {shlex.quote(title)} -e {bash_c}"
+    )),
+]
+
+# Which of _TERMINAL_CANDIDATES are actually installed, in priority order.
+# The answer can't change while the widget is running, so it's computed once
+# and cached instead of re-checked on every button click. Callers run this
+# off the GTK main thread (see _launch_in_terminal_async) anyway, but a lock
+# still guards against two buttons clicked in quick succession both racing
+# into the detection loop before either has cached a result.
+_installed_terminals = None
+_installed_terminals_lock = threading.Lock()
+
+
+def _detect_installed_terminals():
+    global _installed_terminals
+    if _installed_terminals is not None:
+        return _installed_terminals
+    with _installed_terminals_lock:
+        if _installed_terminals is not None:
+            return _installed_terminals
+        _installed_terminals = [
+            (bin_name, build_cmd) for bin_name, build_cmd in _TERMINAL_CANDIDATES
+            if shutil.which(bin_name) is not None
+        ]
+    return _installed_terminals
+
+
+def launch_in_terminal(title, inner_cmd):
+    """Launch inner_cmd (a shell command string) in a new terminal window,
+    with a "press Enter to close" tail, using the first installed terminal
+    from _TERMINAL_CANDIDATES (see _detect_installed_terminals()).
+
+    Explicitly backgrounds the launch (`nohup ... &`) rather than relying on
+    the terminal to self-detach — most do, but the x-terminal-emulator
+    fallback commonly resolves to bare xterm, which doesn't, and would
+    otherwise block this call for the terminal's entire lifetime.
+
+    Deliberately does NOT try to verify the launch actually succeeded (e.g.
+    by checking whether the backgrounded process is still alive a moment
+    later) and fall through to another candidate on failure: many common
+    terminals (gnome-terminal, xfce4-terminal, kgx) use a client-server
+    model where the launching process legitimately exits almost immediately
+    after asking an already-running instance to open a window — that quick
+    exit is indistinguishable from a real failure, so treating it as one
+    would launch a second terminal and run inner_cmd a second time (harmful
+    for anything non-idempotent, like a tool install or update). Once an
+    installed terminal is found, the launch is trusted.
+
+    Returns True if an installed terminal was found and the launch was
+    queued, False if none of _TERMINAL_CANDIDATES is installed."""
+    installed = _detect_installed_terminals()
+    if not installed:
+        return False
+    _, build_cmd = installed[0]
+    full_cmd = f"{inner_cmd}; echo; echo Done -- press Enter; read"
+    bash_c = "bash -c " + shlex.quote(full_cmd)
+    launch = build_cmd(title, bash_c)
+    run_command(f"nohup {launch} >/dev/null 2>&1 &", timeout=5)
+    return True
 
 
 class StatusCard:
@@ -605,7 +699,7 @@ class AgentWidget(Gtk.Window):
         lbl.set_halign(Gtk.Align.START)
         wrapper.pack_start(lbl, False, False, 0)
 
-        # Open Dashboard (OpenClaw) / Open Desktop App (Hermes)
+        # Open Dashboard (OpenClaw) / Open Hermes Chat (Hermes)
         dash_sub = (self.meta["dash_sub"] if self.agent == "hermes"
                     else f"http://127.0.0.1:{self.port}/")
         dash_row = self._make_action_row(
@@ -966,19 +1060,44 @@ class AgentWidget(Gtk.Window):
 
     # ── Action Handlers ───────────────────────────────────────────────────────
 
+    def _launch_in_terminal_async(self, title, inner_cmd):
+        """launch_in_terminal(), off the GTK main thread — it shells out to
+        actually spawn the terminal, which would otherwise briefly block
+        the UI. Shows _no_terminal_dialog() back on the main thread if it
+        fails."""
+        def worker():
+            if not launch_in_terminal(title, inner_cmd):
+                GLib.idle_add(self._no_terminal_dialog)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _no_terminal_dialog(self):
+        """Shown when launch_in_terminal() finds none of _TERMINAL_CANDIDATES
+        installed — a real (if unlikely) possibility on a minimal desktop, and
+        better than the silent no-op this used to be."""
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.CLOSE,
+            text="No terminal emulator found",
+        )
+        tried = ", ".join(name for name, _ in _TERMINAL_CANDIDATES)
+        dialog.format_secondary_text(f"Tried: {tried}. Install one of these to use this action.")
+        dialog.run()
+        dialog.destroy()
+        return False  # idle_add callback: don't repeat
+
     def _on_open_dashboard(self, button):
         if self.agent == "hermes":
             if not self.hermes_bin:
                 return
-            # `hermes desktop` is a long-running Electron app — launch it
-            # detached so it isn't killed by run_command()'s timeout.
-            try:
-                subprocess.Popen(
-                    [self.hermes_bin, "desktop"], start_new_session=True,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            except Exception:
-                pass
+            # `hermes desktop` (the Electron app) only exists if Hermes was
+            # installed with --include-desktop, which our headless install
+            # deliberately doesn't pass — so it's never actually built here.
+            # Bare `hermes` (the interactive TUI chat) is the real primary
+            # interaction surface and always works, so that's the dashboard
+            # equivalent — same terminal-launch path as the other actions.
+            self._launch_in_terminal_async("Hermes Chat", shlex.quote(self.hermes_bin))
             return
         self.port = get_dashboard_port()
         url = f"http://127.0.0.1:{self.port}/"
@@ -992,10 +1111,7 @@ class AgentWidget(Gtk.Window):
             # fire-and-forget command — open it in a terminal like the
             # tool-install action below, rather than the OpenClaw
             # background-thread + result-dialog flow.
-            run_command(
-                "xfce4-terminal --title='Hermes Tools' "
-                f"--command='bash -c \"{self.hermes_bin!r} tools; echo; echo Done -- press Enter; read\"'"
-            )
+            self._launch_in_terminal_async("Hermes Tools", f"{shlex.quote(self.hermes_bin)} tools")
             return
         button.set_sensitive(False)
         self.plugin_sublabel.set_text("Starting...")
@@ -1088,15 +1204,9 @@ class AgentWidget(Gtk.Window):
             if self.agent == "hermes":
                 if not self.hermes_bin:
                     return False
-                run_command(
-                    "xfce4-terminal --title='Hermes Update' "
-                    f"--command='bash -c \"{self.hermes_bin!r} update; echo; echo Done -- press Enter; read\"'"
-                )
+                self._launch_in_terminal_async("Hermes Update", f"{shlex.quote(self.hermes_bin)} update")
             else:
-                run_command(
-                    "xfce4-terminal --title='OpenClaw Update' "
-                    "--command='bash -c \"openclaw update; echo; echo Done -- press Enter; read\"'"
-                )
+                self._launch_in_terminal_async("OpenClaw Update", "openclaw update")
         return False
 
     def _on_install_tool(self, tool):
@@ -1106,12 +1216,11 @@ class AgentWidget(Gtk.Window):
         url = (f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}"
                f"/{self.branch}/{script_path}")
         tool_name = tool.get("name", tool.get("id", "Tool"))
-        cmd = (
-            f"xfce4-terminal --title='Install {tool_name}' "
-            f"--command='bash -c \"wget -qO /tmp/_tool_install.sh {url!r} "
-            f"&& sudo bash /tmp/_tool_install.sh; echo; echo Done -- press Enter; read\"'"
+        inner_cmd = (
+            f"wget -qO /tmp/_tool_install.sh {shlex.quote(url)} "
+            f"&& sudo bash /tmp/_tool_install.sh"
         )
-        run_command(cmd)
+        self._launch_in_terminal_async(f"Install {tool_name}", inner_cmd)
         # Re-fetch tools to update installed status
         GLib.timeout_add_seconds(5, lambda: self._schedule_refresh() or False)
 

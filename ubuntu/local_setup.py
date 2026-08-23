@@ -1080,7 +1080,10 @@ read -rp "  Press Enter to close..."
             f.write(security_script)
         os.chmod("/usr/local/bin/security-check", 0o755)
 
-        # Terminal-agnostic launcher — xfce4-terminal won't exist on GNOME systems
+        # Terminal-agnostic launcher — xfce4-terminal won't exist on GNOME
+        # systems, and even within GNOME the default terminal app varies by
+        # version (gnome-terminal vs. the newer GNOME Console/kgx). Mirrors
+        # the candidate list in openclaw_widget.py's launch_in_terminal().
         launcher = """\
 #!/bin/bash
 # Launch security-check in the best available terminal emulator
@@ -1088,6 +1091,11 @@ if command -v xfce4-terminal &>/dev/null; then
     exec xfce4-terminal --title="SecureClaw Security Check" -e /usr/local/bin/security-check
 elif command -v gnome-terminal &>/dev/null; then
     exec gnome-terminal --title="SecureClaw Security Check" -- /usr/local/bin/security-check
+elif command -v kgx &>/dev/null; then
+    # kgx (GNOME Console) has no --title option (verified against its manpage)
+    exec kgx -e /usr/local/bin/security-check
+elif command -v konsole &>/dev/null; then
+    exec konsole --title "SecureClaw Security Check" -e /usr/local/bin/security-check
 elif command -v x-terminal-emulator &>/dev/null; then
     exec x-terminal-emulator -e /usr/local/bin/security-check
 else

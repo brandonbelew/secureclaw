@@ -536,7 +536,7 @@ Name=Security Check
 Comment=Verify firewall and security settings
 Exec=/usr/local/bin/security-check
 Icon=security-high
-Terminal=false
+Terminal=true
 Categories=System;Security;
 """
         for user_dir in _real_user_homes():
