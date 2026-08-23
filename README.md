@@ -12,6 +12,8 @@ curl -fsSL https://raw.githubusercontent.com/brandonbelew/secureclaw/dev/install
 
 > **Tested on:** Rocky Linux 10 (server), Fedora Server 44, and Ubuntu Server 24.04 LTS.
 
+> **Heads up:** on systems using GNOME Remote Desktop as the RDP backend (e.g. Rocky/RHEL 10, which has no Xorg), the server automatically **reboots** as the last step of setup — GRD only activates cleanly after a fresh boot. Your SSH session will drop; give it about a minute, then reconnect over Tailscale and RDP in.
+
 ### Which installation to use
 
 SecureClaw is built for **servers**, and a fresh, headless **server install** is the recommended and best-tested target. The installer provisions the remote desktop, installs an AI agent, and hardens the machine so it is reachable only over your private Tailscale network.
