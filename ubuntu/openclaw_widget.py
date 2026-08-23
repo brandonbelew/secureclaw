@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-OpenClaw Control Panel Widget
-GTK3 desktop widget for OpenClaw service status and quick actions.
+AI Agent Control Panel Widget
+GTK3 desktop widget for OpenClaw/Hermes Agent service status and quick actions.
+Self-detects which agent is installed (see detect_agent()) and adapts.
 """
 
 import base64
 from datetime import datetime, timezone
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -53,10 +56,141 @@ LOGO_B64 = (
     "JYZvVlkZUOI6kfDq/xDwi4L/AKG5ITVmS9opAAAAAElFTkSuQmCC"
 )
 
+# Hermes Agent icon — derived from https://hermes-agent.nousresearch.com/icon.png
+# (their site's own declared app icon, 48x48). The source is black line art on
+# an opaque white background; recolored to light-on-transparent here so it reads
+# against this widget's dark theme, same as the lobster logo above.
+HERMES_LOGO_B64 = (
+    "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"
+    "gHpraybORdMAAAAASUVORK5CYII="
+)
+
 REPO_OWNER = "brandonbelew"
 REPO_NAME = "secureclaw"
 DEFAULT_PORT = 18789
 REPO_BRANCH_OVERRIDE = None  # injected at install time by install_widget.sh
+
+
+def _is_rhel_family():
+    """True on Fedora/RHEL/Rocky/AlmaLinux. Used to pick the firewall command
+    (firewall-cmd vs ufw). Falls back to False (ufw) if detection fails."""
+    try:
+        from platform_support import detect_family  # co-located in /usr/local/bin
+        info = {}
+        with open("/etc/os-release") as f:
+            for line in f:
+                if "=" in line:
+                    k, _, v = line.strip().partition("=")
+                    info[k] = v.strip('"')
+        return detect_family(info) == "rhel"
+    except Exception:
+        return False
+
+
+IS_RHEL = _is_rhel_family()
+
+
+def find_hermes_binary():
+    """Absolute path to the `hermes` command, checked directly rather than
+    via PATH lookup. The widget launches from a non-login XDG autostart
+    entry (Exec=..., Terminal=false), whose PATH isn't guaranteed to include
+    ~/.local/bin — where a non-root Hermes install places the command (per
+    its own resolve_install_layout(); /usr/local/bin for a root/FHS
+    install). Falls back to a PATH lookup as a last resort. Returns None if
+    Hermes isn't found by either method."""
+    home = str(Path.home())
+    for candidate in ("/usr/local/bin/hermes", f"{home}/.local/bin/hermes"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    stdout, _, rc = run_command("command -v hermes", timeout=5)
+    return stdout if rc == 0 and stdout else None
+
+
+def detect_agent(hermes_bin):
+    """Which AI agent this widget should monitor. Prefers Hermes if its
+    binary was found (see find_hermes_binary()) and OpenClaw's isn't;
+    defaults to openclaw otherwise."""
+    _, _, openclaw_rc = run_command("command -v openclaw", timeout=5)
+    if hermes_bin and openclaw_rc != 0:
+        return "hermes"
+    return "openclaw"
+
+
+# Per-agent display text and command surface. Hermes commands verified
+# against https://hermes-agent.nousresearch.com/docs/reference/cli-commands
+# (not guessed) — `hermes gateway status`, `hermes --version`, and
+# `hermes update` (including its documented `--check` "preview without
+# installing" flag) are all real, documented subcommands. Hermes has no
+# local HTTP dashboard like OpenClaw's, so "Open Dashboard" becomes "Open
+# Hermes Chat" — the bare `hermes` interactive TUI, opened in a terminal.
+# (`hermes desktop`, the Electron app, was considered too, but it's only
+# built when Hermes is installed with --include-desktop, which our headless
+# install deliberately doesn't pass, so it's never actually present.)
+# "Start Browser" (no direct Hermes equivalent) becomes "Configure Tools"
+# (`hermes tools`).
+AGENT_META = {
+    "openclaw": {
+        "label": "OpenClaw",
+        "window_title": "OpenClaw Control Panel",
+        "service_card_name": "OpenClaw Service",
+        "dash_label": "Open Dashboard",
+        "browser_label": "Start Browser",
+        "browser_sub": "Start the OpenClaw managed browser",
+        "update_sub": "Checks openclaw update status",
+        "logo_b64": LOGO_B64,
+    },
+    "hermes": {
+        "label": "Hermes Agent",
+        "window_title": "Hermes Agent Control Panel",
+        "service_card_name": "Hermes Gateway",
+        "dash_label": "Open Hermes Chat",
+        "dash_sub": "Open the interactive Hermes chat in a terminal",
+        "browser_label": "Configure Tools",
+        "browser_sub": "Open hermes tools in a terminal",
+        "update_sub": "Checks hermes update status",
+        "logo_b64": HERMES_LOGO_B64,
+    },
+}
 
 DARK_CSS = """
 window {
@@ -263,6 +397,103 @@ def run_command(cmd, shell=True, timeout=10):
         return "", str(e), 1
 
 
+# Terminal emulators to try, in priority order, for launching an interactive
+# command in a new window. The desktop environment varies by RDP backend:
+# xrdp always forces an XFCE session (xfce4-terminal available) even on a
+# GNOME box, but GNOME Remote Desktop systems (Rocky/RHEL 10, which has no
+# X.Org and so no xrdp/XFCE at all — see detect_and_setup_desktop()) don't
+# have XFCE at all — and confirmed live on Rocky 10, EL10's "Server with GUI"
+# group doesn't ship ANY terminal by default: neither gnome-terminal nor
+# gnome-console/kgx is even packaged for EL10. install_gnome_desktop() (see
+# platform_support.py) now explicitly installs xterm to guarantee one is
+# always present there. x-terminal-emulator is Debian-only (its own
+# update-alternatives convention — RHEL has no such binary at all, verified
+# live), so it only ever resolves on Debian/Ubuntu; xterm covers the same
+# "last resort, always available" role on RHEL. Each entry is
+# (binary, argv-builder) since terminals don't share a CLI contract:
+# xfce4-terminal and kgx each want a single --command= string they re-parse
+# themselves (kgx has no --title option at all — verified against its actual
+# manpage, not guessed), while the rest take the command as literal trailing
+# argv after a separator.
+_TERMINAL_CANDIDATES = [
+    ("xfce4-terminal", lambda title, bash_c: (
+        f"xfce4-terminal --title={shlex.quote(title)} --command={shlex.quote(bash_c)}"
+    )),
+    ("gnome-terminal", lambda title, bash_c: (
+        f"gnome-terminal --title={shlex.quote(title)} -- {bash_c}"
+    )),
+    ("kgx", lambda title, bash_c: (  # GNOME Console — replaces gnome-terminal on newer GNOME
+        f"kgx --command={shlex.quote(bash_c)}"  # no --title option exists
+    )),
+    ("konsole", lambda title, bash_c: (
+        f"konsole --title {shlex.quote(title)} -e {bash_c}"
+    )),
+    ("x-terminal-emulator", lambda title, bash_c: (  # Debian/Ubuntu only
+        f"x-terminal-emulator -T {shlex.quote(title)} -e {bash_c}"
+    )),
+    ("xterm", lambda title, bash_c: (  # last resort — provisioned explicitly on EL10/GRD
+        f"xterm -T {shlex.quote(title)} -e {bash_c}"
+    )),
+]
+
+# Which of _TERMINAL_CANDIDATES are actually installed, in priority order.
+# The answer can't change while the widget is running, so it's computed once
+# and cached instead of re-checked on every button click. Callers run this
+# off the GTK main thread (see _launch_in_terminal_async) anyway, but a lock
+# still guards against two buttons clicked in quick succession both racing
+# into the detection loop before either has cached a result.
+_installed_terminals = None
+_installed_terminals_lock = threading.Lock()
+
+
+def _detect_installed_terminals():
+    global _installed_terminals
+    if _installed_terminals is not None:
+        return _installed_terminals
+    with _installed_terminals_lock:
+        if _installed_terminals is not None:
+            return _installed_terminals
+        _installed_terminals = [
+            (bin_name, build_cmd) for bin_name, build_cmd in _TERMINAL_CANDIDATES
+            if shutil.which(bin_name) is not None
+        ]
+    return _installed_terminals
+
+
+def launch_in_terminal(title, inner_cmd):
+    """Launch inner_cmd (a shell command string) in a new terminal window,
+    with a "press Enter to close" tail, using the first installed terminal
+    from _TERMINAL_CANDIDATES (see _detect_installed_terminals()).
+
+    Explicitly backgrounds the launch (`nohup ... &`) rather than relying on
+    the terminal to self-detach — most do, but the x-terminal-emulator
+    fallback commonly resolves to bare xterm, which doesn't, and would
+    otherwise block this call for the terminal's entire lifetime.
+
+    Deliberately does NOT try to verify the launch actually succeeded (e.g.
+    by checking whether the backgrounded process is still alive a moment
+    later) and fall through to another candidate on failure: many common
+    terminals (gnome-terminal, xfce4-terminal, kgx) use a client-server
+    model where the launching process legitimately exits almost immediately
+    after asking an already-running instance to open a window — that quick
+    exit is indistinguishable from a real failure, so treating it as one
+    would launch a second terminal and run inner_cmd a second time (harmful
+    for anything non-idempotent, like a tool install or update). Once an
+    installed terminal is found, the launch is trusted.
+
+    Returns True if an installed terminal was found and the launch was
+    queued, False if none of _TERMINAL_CANDIDATES is installed."""
+    installed = _detect_installed_terminals()
+    if not installed:
+        return False
+    _, build_cmd = installed[0]
+    full_cmd = f"{inner_cmd}; echo; echo Done -- press Enter; read"
+    bash_c = "bash -c " + shlex.quote(full_cmd)
+    launch = build_cmd(title, bash_c)
+    run_command(f"nohup {launch} >/dev/null 2>&1 &", timeout=5)
+    return True
+
+
 class StatusCard:
     """A single LED status card widget."""
 
@@ -335,21 +566,26 @@ class StatusCard:
         return True
 
 
-class OpenClawWidget(Gtk.Window):
+class AgentWidget(Gtk.Window):
 
     def __init__(self):
-        super().__init__(title="OpenClaw Control Panel")
+        self.hermes_bin = find_hermes_binary()
+        self.agent = detect_agent(self.hermes_bin)
+        self.meta = AGENT_META[self.agent]
+        super().__init__(title=self.meta["window_title"])
         self.set_default_size(420, -1)
         self.set_resizable(False)
         self.set_position(Gtk.WindowPosition.CENTER)
 
         self.branch = get_repo_branch()
-        self.port = get_dashboard_port()
+        self.port = get_dashboard_port() if self.agent == "openclaw" else DEFAULT_PORT
         self.tools_data = []
         self._tool_rows = {}
 
-        # Build lobster pixbuf once — reused at header (48px) and action rows (24px)
-        _logo_data = base64.b64decode(LOGO_B64)
+        # Build the agent's logo pixbuf once — reused at header (48px) and
+        # action rows (24px). OpenClaw's is the SecureClaw lobster mascot;
+        # Hermes's is their own site icon (see HERMES_LOGO_B64 above).
+        _logo_data = base64.b64decode(self.meta["logo_b64"])
         _stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(_logo_data))
         self.logo_pixbuf_48 = GdkPixbuf.Pixbuf.new_from_stream_at_scale(
             _stream, 48, 48, True, None
@@ -404,7 +640,7 @@ class OpenClawWidget(Gtk.Window):
         box.pack_start(logo_img, False, False, 0)
 
         text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        title = Gtk.Label(label="OpenClaw Control Panel")
+        title = Gtk.Label(label=self.meta["window_title"])
         title.get_style_context().add_class("title-label")
         title.set_halign(Gtk.Align.START)
         text_box.pack_start(title, False, False, 0)
@@ -435,7 +671,7 @@ class OpenClawWidget(Gtk.Window):
         grid = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         wrapper.pack_start(grid, False, False, 0)
 
-        self.card_service = StatusCard("OpenClaw Service")
+        self.card_service = StatusCard(self.meta["service_card_name"])
         self.card_tailscale = StatusCard("Tailscale VPN")
         self.card_firewall = StatusCard("Firewall Rules")
 
@@ -471,20 +707,22 @@ class OpenClawWidget(Gtk.Window):
         lbl.set_halign(Gtk.Align.START)
         wrapper.pack_start(lbl, False, False, 0)
 
-        # Open Dashboard
+        # Open Dashboard (OpenClaw) / Open Hermes Chat (Hermes)
+        dash_sub = (self.meta["dash_sub"] if self.agent == "hermes"
+                    else f"http://127.0.0.1:{self.port}/")
         dash_row = self._make_action_row(
-            "Open Dashboard",
-            f"http://127.0.0.1:{self.port}/",
+            self.meta["dash_label"],
+            dash_sub,
             self._on_open_dashboard,
             icon_pixbuf=self.logo_pixbuf_24
         )
         self.dash_sublabel = dash_row[1]
         wrapper.pack_start(dash_row[0], False, False, 0)
 
-        # Start Browser
+        # Start Browser (OpenClaw) / Configure Tools (Hermes)
         plugin_row = self._make_action_row(
-            "Start Browser",
-            "Start the OpenClaw managed browser",
+            self.meta["browser_label"],
+            self.meta["browser_sub"],
             self._on_install_plugin,
             icon_pixbuf=self.logo_pixbuf_24
         )
@@ -494,7 +732,7 @@ class OpenClawWidget(Gtk.Window):
         # Check for Updates
         update_row = self._make_action_row(
             "Check for Updates",
-            "Checks openclaw update status",
+            self.meta["update_sub"],
             self._on_check_updates,
             icon_pixbuf=self.logo_pixbuf_24
         )
@@ -688,8 +926,9 @@ class OpenClawWidget(Gtk.Window):
         self.refresh_time_label.set_text(f"⟳ Refreshed {now}")
         self.uptime_label.set_markup(f'<span foreground="#4caf50">{uptime}</span>')
 
-        self.port = get_dashboard_port()
-        self.dash_sublabel.set_text(f"http://127.0.0.1:{self.port}/")
+        if self.agent == "openclaw":
+            self.port = get_dashboard_port()
+            self.dash_sublabel.set_text(f"http://127.0.0.1:{self.port}/")
 
         self.tools_data = tools or []
         self._update_tools_ui(self.tools_data)
@@ -699,6 +938,8 @@ class OpenClawWidget(Gtk.Window):
     # ── Individual Checks ─────────────────────────────────────────────────────
 
     def _check_service(self):
+        if self.agent == "hermes":
+            return self._check_service_hermes()
         stdout, _, rc = run_command(
             "systemctl --user is-active openclaw-gateway", timeout=8
         )
@@ -708,6 +949,25 @@ class OpenClawWidget(Gtk.Window):
             return "red", stdout or "inactive"
         else:
             return "red", "not running"
+
+    def _check_service_hermes(self):
+        if not self.hermes_bin:
+            return "yellow", "not installed"
+        # `hermes gateway status` is a real subcommand ("Show service
+        # status" per Hermes's own CLI reference), but its exact output text
+        # isn't documented — parse defensively by keyword rather than an
+        # exact match. The gateway is optional (only needed for messaging
+        # platforms), so "not running" is a normal, not-broken state. An
+        # unrecognized output format is reported as "unknown" (yellow)
+        # rather than guessed as "not running" (red) — we'd rather admit
+        # uncertainty than falsely flag a healthy gateway as broken.
+        stdout, stderr, rc = run_command(f"{self.hermes_bin} gateway status", timeout=8)
+        combined = f"{stdout} {stderr}".lower()
+        if "not running" in combined or "stopped" in combined or "inactive" in combined:
+            return "red", "not running"
+        if "running" in combined or "active" in combined:
+            return "green", "running"
+        return "yellow", "unknown"
 
     def _check_tailscale(self):
         """Returns (led_state, status_text, ip_host_text, expiry_markup)."""
@@ -758,6 +1018,16 @@ class OpenClawWidget(Gtk.Window):
             return ""
 
     def _check_firewall(self):
+        if IS_RHEL:
+            # firewall-cmd --state prints "running" (rc 0) or "not running"
+            # (rc != 0); the widget's sudoers grants this command passwordless.
+            stdout, stderr, rc = run_command("sudo -n firewall-cmd --state", timeout=8)
+            text = (stdout or "") + (stderr or "")
+            if "not running" in text:
+                return "red", "inactive"
+            if rc == 0 and "running" in text:
+                return "green", "active"
+            return "yellow", "unknown"
         stdout, stderr, rc = run_command("sudo -n ufw status", timeout=8)
         if rc != 0:
             return "yellow", "unknown"
@@ -766,10 +1036,17 @@ class OpenClawWidget(Gtk.Window):
         return "red", "inactive"
 
     def _get_version(self):
-        stdout, _, rc = run_command("openclaw -V", timeout=8)
+        fallback = self.agent
+        if self.agent == "hermes":
+            if not self.hermes_bin:
+                return fallback
+            cmd = f"{self.hermes_bin} --version"
+        else:
+            cmd = "openclaw -V"
+        stdout, _, rc = run_command(cmd, timeout=8)
         if rc == 0 and stdout:
-            return stdout.split()[0] if stdout else "openclaw"
-        return "openclaw"
+            return stdout.split()[0] if stdout else fallback
+        return fallback
 
     def _get_uptime(self):
         stdout, _, rc = run_command("uptime -p", timeout=5)
@@ -791,12 +1068,59 @@ class OpenClawWidget(Gtk.Window):
 
     # ── Action Handlers ───────────────────────────────────────────────────────
 
+    def _launch_in_terminal_async(self, title, inner_cmd):
+        """launch_in_terminal(), off the GTK main thread — it shells out to
+        actually spawn the terminal, which would otherwise briefly block
+        the UI. Shows _no_terminal_dialog() back on the main thread if it
+        fails."""
+        def worker():
+            if not launch_in_terminal(title, inner_cmd):
+                GLib.idle_add(self._no_terminal_dialog)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _no_terminal_dialog(self):
+        """Shown when launch_in_terminal() finds none of _TERMINAL_CANDIDATES
+        installed — a real (if unlikely) possibility on a minimal desktop, and
+        better than the silent no-op this used to be."""
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.CLOSE,
+            text="No terminal emulator found",
+        )
+        tried = ", ".join(name for name, _ in _TERMINAL_CANDIDATES)
+        dialog.format_secondary_text(f"Tried: {tried}. Install one of these to use this action.")
+        dialog.run()
+        dialog.destroy()
+        return False  # idle_add callback: don't repeat
+
     def _on_open_dashboard(self, button):
+        if self.agent == "hermes":
+            if not self.hermes_bin:
+                return
+            # `hermes desktop` (the Electron app) only exists if Hermes was
+            # installed with --include-desktop, which our headless install
+            # deliberately doesn't pass — so it's never actually built here.
+            # Bare `hermes` (the interactive TUI chat) is the real primary
+            # interaction surface and always works, so that's the dashboard
+            # equivalent — same terminal-launch path as the other actions.
+            self._launch_in_terminal_async("Hermes Chat", shlex.quote(self.hermes_bin))
+            return
         self.port = get_dashboard_port()
         url = f"http://127.0.0.1:{self.port}/"
         run_command(f"xdg-open {url!r}")
 
     def _on_install_plugin(self, button):
+        if self.agent == "hermes":
+            if not self.hermes_bin:
+                return
+            # `hermes tools` is an interactive terminal wizard, not a
+            # fire-and-forget command — open it in a terminal like the
+            # tool-install action below, rather than the OpenClaw
+            # background-thread + result-dialog flow.
+            self._launch_in_terminal_async("Hermes Tools", f"{shlex.quote(self.hermes_bin)} tools")
+            return
         button.set_sensitive(False)
         self.plugin_sublabel.set_text("Starting...")
 
@@ -807,11 +1131,15 @@ class OpenClawWidget(Gtk.Window):
         threading.Thread(target=do_start, daemon=True).start()
 
     def _show_browser_dialog(self, button, rc):
-        self.plugin_sublabel.set_text("Start the OpenClaw managed browser")
+        # Only reached via the OpenClaw branch of _on_install_plugin — Hermes
+        # returns early into a terminal-based flow instead. Still uses
+        # self.meta rather than hardcoded OpenClaw text so this stays correct
+        # if that branch is ever restructured.
+        self.plugin_sublabel.set_text(self.meta["browser_sub"])
         button.set_sensitive(True)
 
         dialog = Gtk.Dialog(
-            title="Start Browser",
+            title=self.meta["browser_label"],
             transient_for=self,
             modal=True
         )
@@ -822,7 +1150,7 @@ class OpenClawWidget(Gtk.Window):
         dialog.get_content_area().set_margin_top(12)
         dialog.get_content_area().set_margin_bottom(12)
 
-        msg = "Browser started." if rc == 0 else "Browser start returned an error. Check openclaw status."
+        msg = "Browser started." if rc == 0 else f"Browser start returned an error. Check {self.agent} status."
         lbl = Gtk.Label(label=msg)
         lbl.set_line_wrap(True)
         lbl.set_halign(Gtk.Align.START)
@@ -840,7 +1168,14 @@ class OpenClawWidget(Gtk.Window):
         self.update_sublabel.set_text("Checking...")
 
         def do_check():
-            stdout, stderr, rc = run_command("openclaw update status", timeout=30)
+            if self.agent == "hermes":
+                if not self.hermes_bin:
+                    GLib.idle_add(self._show_update_dialog, button, "Hermes Agent not found.")
+                    return
+                cmd = f"{self.hermes_bin} update --check"
+            else:
+                cmd = "openclaw update status"
+            stdout, stderr, rc = run_command(cmd, timeout=30)
             result = stdout or stderr or "No output from update check."
             GLib.idle_add(self._show_update_dialog, button, result)
 
@@ -862,7 +1197,7 @@ class OpenClawWidget(Gtk.Window):
             modal=True,
             message_type=Gtk.MessageType.INFO,
             buttons=Gtk.ButtonsType.NONE,
-            text="OpenClaw Update Status"
+            text=f"{self.meta['label']} Update Status"
         )
         dialog.format_secondary_text(result)
         dialog.add_button("Dismiss", Gtk.ResponseType.CLOSE)
@@ -874,10 +1209,12 @@ class OpenClawWidget(Gtk.Window):
         dialog.destroy()
 
         if response == Gtk.ResponseType.ACCEPT:
-            run_command(
-                "xfce4-terminal --title='OpenClaw Update' "
-                "--command='bash -c \"openclaw update; echo; echo Done -- press Enter; read\"'"
-            )
+            if self.agent == "hermes":
+                if not self.hermes_bin:
+                    return False
+                self._launch_in_terminal_async("Hermes Update", f"{shlex.quote(self.hermes_bin)} update")
+            else:
+                self._launch_in_terminal_async("OpenClaw Update", "openclaw update")
         return False
 
     def _on_install_tool(self, tool):
@@ -887,18 +1224,17 @@ class OpenClawWidget(Gtk.Window):
         url = (f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}"
                f"/{self.branch}/{script_path}")
         tool_name = tool.get("name", tool.get("id", "Tool"))
-        cmd = (
-            f"xfce4-terminal --title='Install {tool_name}' "
-            f"--command='bash -c \"wget -qO /tmp/_tool_install.sh {url!r} "
-            f"&& sudo bash /tmp/_tool_install.sh; echo; echo Done -- press Enter; read\"'"
+        inner_cmd = (
+            f"wget -qO /tmp/_tool_install.sh {shlex.quote(url)} "
+            f"&& sudo bash /tmp/_tool_install.sh"
         )
-        run_command(cmd)
+        self._launch_in_terminal_async(f"Install {tool_name}", inner_cmd)
         # Re-fetch tools to update installed status
         GLib.timeout_add_seconds(5, lambda: self._schedule_refresh() or False)
 
 
 def main():
-    widget = OpenClawWidget()
+    widget = AgentWidget()
     widget.show_all()
     Gtk.main()
 

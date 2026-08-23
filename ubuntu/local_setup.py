@@ -2,7 +2,8 @@
 """
 Local Ubuntu 24.04 LTS Setup Script
 For physically-present desktop installs — configures xrdp, Tailscale,
-security lockdown, and installs OpenClaw + Chrome.
+security lockdown, and installs an AI agent (OpenClaw or Hermes Agent,
+via SECURECLAW_AGENT) + Chrome.
 
 Handles GNOME (Ubuntu default) and XFCE desktop environments.
 All setup runs in a single phase — no SSH disconnect or reconnect required.
@@ -21,6 +22,7 @@ import secrets
 import string
 import getpass
 from pathlib import Path
+from platform_support import Platform
 
 STATE_FILE = "/var/lib/local-setup/state.json"
 
@@ -52,18 +54,66 @@ class Colors:
 
 
 class LocalUbuntuSetup:
+    # AI agent choices — label for display, onboard_cmd for the manual
+    # follow-up step deferred by the non-interactive installer flags.
+    AGENT_INFO = {
+        "openclaw": {"label": "OpenClaw", "onboard_cmd": "openclaw onboard"},
+        "hermes":   {"label": "Hermes Agent", "onboard_cmd": "hermes setup"},
+    }
 
     def __init__(self):
         self.setup_log    = []
         self.desktop_type = None   # 'gnome', 'xfce'  — set during setup
         self.install_user = None   # set during select_install_user
         self.tailscale_ip = None   # set during configure_tailscale
+        self.os_info      = self._detect_os_info()
+        # Distro abstraction (package manager, firewall, repos, group names)
+        self.plat         = Platform(self.run_command, self.os_info)
 
         # Restore any persisted state from a previous (interrupted) run
         state = self._load_state()
         self.desktop_type = state.get("desktop_type")
         self.install_user = state.get("install_user")
         self.tailscale_ip = state.get("tailscale_ip")
+        self.rdp_backend  = state.get("rdp_backend")  # 'xrdp' or 'grd'
+        self.rdp_password = None  # captured during user selection (grd needs it)
+        self.grd_needs_reboot = False  # GRD activates only on a clean boot
+
+        # Which AI agent to install. SECURECLAW_AGENT (baked into the
+        # local-setup wrapper by the most recent install.sh run) takes
+        # priority over any previously-persisted choice, so re-running
+        # install.sh to pick a different agent after an interrupted attempt
+        # actually takes effect — UNLESS an agent has already actually been
+        # installed on this machine. Switching agents mid-lifecycle isn't
+        # supported: the security-check script, widget, and final report are
+        # each generated once behind their own _step_done() gate, so silently
+        # changing agent_type after that point would leave them permanently
+        # describing the wrong agent. Once installed, the choice sticks;
+        # persisted state is otherwise only the fallback — for a direct
+        # re-invocation of this script where the wrapper's env var is unset
+        # or invalid.
+        env_agent = os.environ.get("SECURECLAW_AGENT", "").strip().lower()
+        prior_agent = state.get("agent_type")
+        agent_already_installed = bool(state.get("openclaw_installed") or state.get("hermes_installed"))
+        if agent_already_installed and prior_agent not in self.AGENT_INFO:
+            # Machine was set up before agent_type existed in state — it can
+            # only have been OpenClaw (Hermes always saves agent_type).
+            prior_agent = "hermes" if state.get("hermes_installed") else "openclaw"
+
+        if agent_already_installed and prior_agent in self.AGENT_INFO:
+            self.agent_type = prior_agent
+            if env_agent in self.AGENT_INFO and env_agent != prior_agent:
+                print(f"{Colors.WARNING}Note: this machine already has "
+                      f"{self.AGENT_INFO[prior_agent]['label']} installed — ignoring the new "
+                      f"'{env_agent}' selection. Switching AI agents on an already-configured "
+                      f"machine isn't supported by this installer.{Colors.ENDC}")
+        elif env_agent in self.AGENT_INFO:
+            self.agent_type = env_agent
+        else:
+            self.agent_type = prior_agent if prior_agent in self.AGENT_INFO else "openclaw"
+        self._save_state(agent_type=self.agent_type)
+        self.agent_label = self.AGENT_INFO[self.agent_type]["label"]
+        self.agent_onboard_cmd = self.AGENT_INFO[self.agent_type]["onboard_cmd"]
 
     # ── State management ──────────────────────────────────────────────────────
 
@@ -136,14 +186,19 @@ class LocalUbuntuSetup:
 
     # ── OS helpers ────────────────────────────────────────────────────────────
 
-    def get_os_codename(self):
+    def _detect_os_info(self):
+        """Read /etc/os-release and return a dict of OS metadata"""
+        info = {}
         try:
-            r = subprocess.run(
-                "lsb_release -cs", shell=True, capture_output=True, text=True, check=True
-            )
-            return r.stdout.strip()
+            with open("/etc/os-release") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line:
+                        k, _, v = line.partition("=")
+                        info[k] = v.strip('"')
         except Exception:
-            return "noble"  # 24.04 fallback
+            pass
+        return info
 
     def find_service(self, *candidates):
         for name in candidates:
@@ -167,13 +222,12 @@ class LocalUbuntuSetup:
             return
 
         print(f"\n{Colors.HEADER}=== SYSTEM UPDATE ==={Colors.ENDC}")
-        self.run_command("apt-get update", capture_output=False)
-        self.run_command("apt-get upgrade -y", capture_output=False)
+        self.plat.pkg_refresh()
+        self.plat.pkg_upgrade()
         # Include openssh-server — not installed by default on Ubuntu Desktop
-        self.run_command(
-            "apt-get install -y curl wget gnupg2 software-properties-common "
-            "python3-tk openssh-server",
-            capture_output=False
+        self.plat.pkg_install(
+            "curl", "wget", "gnupg", "apt_extras", "tk", "openssh_server",
+            logical=True,
         )
         self.log("System update completed", "SUCCESS")
         self._save_state(system_updated=True)
@@ -186,21 +240,38 @@ class LocalUbuntuSetup:
 
         print(f"\n{Colors.HEADER}=== DESKTOP DETECTION ==={Colors.ENDC}")
 
-        # GNOME
-        r = self.run_command(
-            "dpkg -l gnome-shell 2>/dev/null | grep '^ii' || "
-            "dpkg -l gdm3 2>/dev/null | grep '^ii'",
-            check=False
-        )
-        if r.returncode == 0:
+        # Pick the RDP backend (EPEL/CRB first so the xrdp check is accurate).
+        self.plat.ensure_extra_repos()
+        self.rdp_backend = self.plat.remote_desktop_backend
+        self._save_state(rdp_backend=self.rdp_backend)
+
+        if self.rdp_backend is None:
+            self.log("No remote-desktop backend (xrdp or gnome-remote-desktop) "
+                     "is available on this OS.", "ERROR")
+            sys.exit(1)
+
+        if self.rdp_backend == "grd":
+            # EL10: xrdp is gone with X.Org — use GNOME + gnome-remote-desktop.
+            self.log("xrdp unavailable on this OS — using GNOME Remote Desktop", "WARNING")
+            if not (self.plat.pkg_installed("gnome-shell") or self.plat.pkg_installed("gdm")):
+                self.plat.install_gnome_desktop()
+            else:
+                self.plat.pkg_install("gnome-remote-desktop")
+            self.desktop_type = "gnome"
+            self.log("GNOME desktop + gnome-remote-desktop ready", "SUCCESS")
+            self._save_state(desktop_detected=True, desktop_type="gnome")
+            return
+
+        # GNOME (gdm3 on Debian, gdm on RHEL)
+        if self.plat.pkg_installed("gnome-shell") or \
+                self.plat.pkg_installed("gdm3") or self.plat.pkg_installed("gdm"):
             self.desktop_type = "gnome"
             self.log("Detected: GNOME desktop", "SUCCESS")
             self._save_state(desktop_detected=True, desktop_type="gnome")
             return
 
         # XFCE
-        r = self.run_command("dpkg -l xfce4-session 2>/dev/null | grep '^ii'", check=False)
-        if r.returncode == 0:
+        if self.plat.pkg_installed("xfce4-session"):
             self.desktop_type = "xfce"
             self.log("Detected: XFCE desktop", "SUCCESS")
             self._save_state(desktop_detected=True, desktop_type="xfce")
@@ -208,9 +279,8 @@ class LocalUbuntuSetup:
 
         # Nothing found — install XFCE
         self.log("No desktop environment found — installing XFCE + LightDM", "WARNING")
-        self.run_command(
-            "apt-get install -y xfce4 xfce4-goodies lightdm", capture_output=False
-        )
+        self.plat.ensure_extra_repos()
+        self.plat.pkg_install("xfce", "lightdm", logical=True)
         Path("/etc/lightdm").mkdir(parents=True, exist_ok=True)
         with open("/etc/lightdm/lightdm.conf", "w") as f:
             f.write("[Seat:*]\nWaylandEnable=false\nuser-session=xfce\n")
@@ -220,103 +290,68 @@ class LocalUbuntuSetup:
         self._save_state(desktop_detected=True, desktop_type="xfce")
 
     def setup_xrdp(self):
-        """Install xrdp and configure it for the detected desktop type."""
+        """Install xrdp and configure it for the detected desktop type.
+        For the GNOME Remote Desktop backend (EL10) this is a no-op — GRD is
+        configured in configure_grd() once the install user/password is known."""
+        if self.rdp_backend == "grd":
+            return
         if self._step_done("xrdp_configured"):
             self.log("xrdp already configured — skipping", "SUCCESS")
             return
 
         print(f"\n{Colors.HEADER}=== XRDP SETUP ==={Colors.ENDC}")
 
-        r = self.run_command("dpkg -l xrdp 2>/dev/null | grep '^ii'", check=False)
-        if r.returncode != 0:
+        if not self.plat.pkg_installed("xrdp"):
             self.log("Installing xrdp...")
-            self.run_command("apt-get install -y xrdp", capture_output=False)
+            self.plat.ensure_extra_repos()
+            self.plat.pkg_install("xrdp", logical=True)
+
+        # xrdp serves an XFCE session regardless of the machine's main desktop:
+        # GNOME 48+ is Wayland-only and aborts under xrdp's X11 backend, so we
+        # run XFCE for RDP and leave the user's GNOME console session untouched.
+        if not self.plat.pkg_installed("xfce4-session"):
+            self.log("Installing XFCE for the RDP session...")
+            self.plat.ensure_extra_repos()
+            self.plat.pkg_install("xfce", logical=True)
 
         # Needed to avoid TLS certificate errors in xrdp sessions
         self.run_command("adduser xrdp ssl-cert", check=False)
 
-        if self.desktop_type == "gnome":
-            self._configure_xrdp_for_gnome()
-        else:
-            self._configure_xrdp_for_xfce()
+        self._configure_xrdp_session()
 
         self.service_command("enable", "xrdp")
         self.service_command("restart", "xrdp")
         self.log("xrdp configured and started", "SUCCESS")
         self._save_state(xrdp_configured=True)
 
-    def _configure_xrdp_for_gnome(self):
+    def _configure_xrdp_session(self):
+        """Point xrdp at an XFCE session and stop sessions from blanking.
+
+        Writes a portable /etc/xrdp/startwm.sh that prefers the user's
+        ~/.xsession and falls back to startxfce4. This OVERRIDES the distro
+        default on purpose: Fedora ships a startwm.sh hardcoded to
+        `exec gnome-session` that ignores ~/.xsession, and GNOME 48+ is
+        Wayland-only so it aborts under xrdp's X11 backend (the RDP window
+        opens then immediately closes).
         """
-        Three-step GNOME + xrdp fix for Ubuntu 24.04:
-          1. Disable Wayland in GDM3 (xrdp requires an X11 session)
-          2. Write a polkit rule so the colour-manager auth popup never appears
-          3. Configure startwm.sh to launch gnome-session
-        """
-        # 1. Disable Wayland in GDM3
-        gdm3_conf = Path("/etc/gdm3/custom.conf")
-        if gdm3_conf.exists():
-            text = gdm3_conf.read_text()
-            if "WaylandEnable=false" not in text:
-                # Uncomment the existing commented line if present
-                text = re.sub(r"#\s*WaylandEnable\s*=\s*false", "WaylandEnable=false", text)
-                # Otherwise inject under [daemon]
-                if "WaylandEnable=false" not in text:
-                    text = text.replace("[daemon]", "[daemon]\nWaylandEnable=false", 1)
-                gdm3_conf.write_text(text)
-                self.log("Disabled Wayland in GDM3 (/etc/gdm3/custom.conf)", "SUCCESS")
-            else:
-                self.log("Wayland already disabled in GDM3", "SUCCESS")
-        else:
-            # Create a minimal gdm3 config if it doesn't exist
-            gdm3_conf.parent.mkdir(parents=True, exist_ok=True)
-            gdm3_conf.write_text("[daemon]\nWaylandEnable=false\n")
-            self.log("Created /etc/gdm3/custom.conf with Wayland disabled", "SUCCESS")
-
-        # 2. Polkit rule — prevents colour-manager auth dialogs in every xrdp session
-        polkit_rule = """\
-polkit.addRule(function(action, subject) {
-    if ((action.id == "org.freedesktop.color-manager.create-device"  ||
-         action.id == "org.freedesktop.color-manager.create-profile" ||
-         action.id == "org.freedesktop.color-manager.delete-device"  ||
-         action.id == "org.freedesktop.color-manager.delete-profile" ||
-         action.id == "org.freedesktop.color-manager.modify-device"  ||
-         action.id == "org.freedesktop.color-manager.modify-profile") &&
-        subject.isInGroup("sudo")) {
-        return polkit.Result.YES;
-    }
-});
-"""
-        polkit_dir = Path("/etc/polkit-1/rules.d")
-        polkit_dir.mkdir(parents=True, exist_ok=True)
-        (polkit_dir / "45-allow-colord.rules").write_text(polkit_rule)
-        self.log("Polkit colour-manager rule written", "SUCCESS")
-
-        # 3. startwm.sh — launch a GNOME-on-X11 session
-        startwm_path = Path("/etc/xrdp/startwm.sh")
-        if startwm_path.exists():
-            backup = Path("/etc/xrdp/startwm.sh.pre-local-setup")
-            if not backup.exists():
-                backup.write_text(startwm_path.read_text())
-                self.log("Backed up original startwm.sh", "SUCCESS")
-
-        startwm_path.write_text(
+        startwm = Path("/etc/xrdp/startwm.sh")
+        backup = Path("/etc/xrdp/startwm.sh.orig")
+        if startwm.exists() and not backup.exists():
+            backup.write_text(startwm.read_text())
+            self.log("Backed up original startwm.sh", "SUCCESS")
+        startwm.write_text(
             "#!/bin/sh\n"
             "unset DBUS_SESSION_BUS_ADDRESS\n"
             "unset XDG_RUNTIME_DIR\n"
-            "exec gnome-session\n"
+            'if [ -x "$HOME/.xsession" ]; then exec "$HOME/.xsession"; fi\n'
+            "exec startxfce4\n"
         )
-        os.chmod(startwm_path, 0o755)
-        self.log("xrdp startwm.sh configured for GNOME", "SUCCESS")
+        os.chmod(startwm, 0o755)
+        self.log("xrdp startwm.sh configured for XFCE", "SUCCESS")
 
-    def _configure_xrdp_for_xfce(self):
-        """Disable sleep/screensaver for XFCE xrdp sessions."""
-        # Do NOT touch startwm.sh — the default xrdp behaviour of reading
-        # ~/.xsession works correctly and matches what the VPS setup does.
-
-        # Disable sleep/screensaver so xrdp sessions don't blank
+        # Disable sleep/screensaver so xrdp sessions don't blank.
         xfconf_dir = Path("/etc/xdg/xfce4/xfconf/xfce-perchannel-xml")
         xfconf_dir.mkdir(parents=True, exist_ok=True)
-
         power_xml = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-power-manager" version="1.0">
@@ -327,7 +362,6 @@ polkit.addRule(function(action, subject) {
     <property name="dpms-on-ac-off" type="uint" value="0"/>
   </property>
 </channel>"""
-
         screensaver_xml = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-screensaver" version="1.0">
@@ -336,7 +370,6 @@ polkit.addRule(function(action, subject) {
     <property name="lock-enabled" type="bool" value="false"/>
   </property>
 </channel>"""
-
         (xfconf_dir / "xfce4-power-manager.xml").write_text(power_xml)
         (xfconf_dir / "xfce4-screensaver.xml").write_text(screensaver_xml)
         self.log("XFCE power/screensaver configured for xrdp sessions", "SUCCESS")
@@ -358,13 +391,13 @@ polkit.addRule(function(action, subject) {
             user = existing[0]
             print(f"\n{Colors.CYAN}Found existing user: {Colors.BOLD}{user}{Colors.ENDC}")
             choice = self.get_user_input(
-                "Install OpenClaw and desktop tools for this user?",
+                f"Install {self.agent_label} and desktop tools for this user?",
                 [f"Yes — use {user}", "Create a new user instead"],
                 default_index=0
             )
             if choice == 0:
                 self.install_user = user
-                self.run_command(f"usermod -aG sudo {user}", check=False)
+                self.run_command(f"usermod -aG {self.plat.admin_group} {user}", check=False)
                 self._write_xsession(user)
                 self._save_state(user_selected=True, install_user=user)
                 self.log(f"Using existing user: {user}", "SUCCESS")
@@ -373,7 +406,7 @@ polkit.addRule(function(action, subject) {
         elif len(existing) > 1:
             options = existing + ["Create a new user"]
             choice = self.get_user_input(
-                "Multiple users found. Which user should OpenClaw be installed for?",
+                f"Multiple users found. Which user should {self.agent_label} be installed for?",
                 options
             )
             if choice < len(existing):
@@ -430,10 +463,11 @@ polkit.addRule(function(action, subject) {
         print(f"\n{Colors.GREEN}{Colors.BOLD}" + "\n".join(lines) + f"{Colors.ENDC}\n")
         input(f"{Colors.CYAN}Press Enter once you have saved the credentials...{Colors.ENDC}")
 
+        admin = self.plat.admin_group  # 'sudo' on Debian, 'wheel' on RHEL
         try:
-            self.run_command(f"useradd -m -s /bin/bash -G sudo,audio,video,input {username}")
+            self.run_command(f"useradd -m -s /bin/bash -G {admin},audio,video,input {username}")
         except subprocess.CalledProcessError:
-            self.run_command(f"useradd -m -s /bin/bash -G sudo,audio,video {username}")
+            self.run_command(f"useradd -m -s /bin/bash -G {admin},audio,video {username}")
 
         cp = subprocess.run(['chpasswd'], input=f"{username}:{password}", text=True, capture_output=True)
         if cp.returncode != 0:
@@ -441,27 +475,73 @@ polkit.addRule(function(action, subject) {
             raise subprocess.CalledProcessError(cp.returncode, 'chpasswd')
 
         self.install_user = username
+        self.rdp_password = password  # GNOME Remote Desktop needs it for grdctl
         self._write_xsession(username)
         self.log(f"User '{username}' created", "SUCCESS")
         self._save_state(user_selected=True, install_user=username)
 
     def _write_xsession(self, username):
-        """Write a desktop-appropriate .xsession for the user's xrdp sessions."""
-        xsession_path = Path(f"/home/{username}/.xsession")
-        if self.desktop_type == "gnome":
-            content = (
-                "#!/bin/bash\n"
-                "unset DBUS_SESSION_BUS_ADDRESS\n"
-                "unset XDG_RUNTIME_DIR\n"
-                "exec gnome-session\n"
-            )
-        else:
-            content = "#!/bin/bash\nexec xfce4-session\n"
+        # The .xsession launcher is an xrdp/XFCE concept; the GNOME Remote
+        # Desktop backend uses the GDM-managed GNOME session instead.
+        if self.rdp_backend == "grd":
+            return
+        return self._write_xsession_impl(username)
 
-        xsession_path.write_text(content)
+    def _write_xsession_impl(self, username):
+        """Write the user's xrdp .xsession — always XFCE. GNOME 48+ is
+        Wayland-only and can't run under xrdp's X11 backend, so the RDP session
+        is XFCE even on a GNOME machine (the console GNOME session is untouched)."""
+        xsession_path = Path(f"/home/{username}/.xsession")
+        xsession_path.write_text(
+            "#!/bin/bash\n"
+            "export XDG_SESSION_DESKTOP=xfce\n"
+            "export XDG_CURRENT_DESKTOP=XFCE\n"
+            "export DESKTOP_SESSION=xfce\n"
+            "exec startxfce4\n"
+        )
         self.run_command(f"chown {username}:{username} {xsession_path}")
-        self.run_command(f"chmod 755 {xsession_path}")
-        self.log(f"Written .xsession ({self.desktop_type}) for {username}", "SUCCESS")
+        self.run_command(f"chmod 700 {xsession_path}")
+        self.run_command(f"restorecon {xsession_path}", check=False)  # SELinux label
+        self.log(f"Written XFCE .xsession for {username}", "SUCCESS")
+
+    def configure_grd(self):
+        """Configure GNOME Remote Desktop (EL10). Runs after the install user is
+        chosen, because grdctl needs the RDP login password. No-op for xrdp."""
+        if self.rdp_backend != "grd":
+            return
+        if self._step_done("xrdp_configured"):
+            self.log("Remote desktop already configured — skipping", "SUCCESS")
+            return
+
+        print(f"\n{Colors.HEADER}=== GNOME REMOTE DESKTOP ==={Colors.ENDC}")
+
+        # A freshly-created user already has self.rdp_password. For an existing
+        # user we can't read it, so prompt — and set it, so the RDP credential
+        # gate and the GDM login use the same password.
+        if not self.rdp_password:
+            while True:
+                p1 = getpass.getpass(
+                    f"{Colors.CYAN}Set the RDP/login password for "
+                    f"{self.install_user}: {Colors.ENDC}")
+                if not p1:
+                    print(f"{Colors.WARNING}Password cannot be empty.{Colors.ENDC}")
+                    continue
+                if p1 != getpass.getpass(f"{Colors.CYAN}Confirm: {Colors.ENDC}"):
+                    print(f"{Colors.WARNING}Passwords do not match.{Colors.ENDC}")
+                    continue
+                self.rdp_password = p1
+                break
+            cp = subprocess.run(["chpasswd"],
+                                input=f"{self.install_user}:{self.rdp_password}",
+                                text=True, capture_output=True)
+            if cp.returncode != 0:
+                self.log(f"Failed to set password: {cp.stderr}", "WARNING")
+
+        self.log("Configuring GNOME Remote Desktop (RDP)...")
+        self.plat.setup_gnome_remote_desktop(self.install_user, self.rdp_password)
+        self.grd_needs_reboot = True  # GRD activates on the next boot
+        self.log("GNOME Remote Desktop configured (activates on reboot)", "SUCCESS")
+        self._save_state(xrdp_configured=True)
 
     # ── Tailscale ─────────────────────────────────────────────────────────────
 
@@ -478,17 +558,9 @@ polkit.addRule(function(action, subject) {
             self._save_state(tailscale_installed=True)
             return
 
-        codename = self.get_os_codename()
-        self.run_command(
-            f"curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/{codename}.noarmor.gpg "
-            f"| tee /usr/share/keyrings/tailscale-archive-keyring.gpg > /dev/null"
-        )
-        self.run_command(
-            f"curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/{codename}.tailscale-keyring.list "
-            f"| tee /etc/apt/sources.list.d/tailscale.list"
-        )
-        self.run_command("apt-get update")
-        self.run_command("apt-get install -y tailscale")
+        # Adds the per-distro Tailscale repo (apt source or dnf .repo) and
+        # installs the client.
+        self.plat.add_tailscale_repo()
         self.log("Tailscale installed", "SUCCESS")
         self._save_state(tailscale_installed=True)
 
@@ -563,7 +635,7 @@ polkit.addRule(function(action, subject) {
 
     def lockdown_server(self):
         """
-        Apply UFW rules restricting SSH and RDP to Tailscale-only access.
+        Apply firewall rules restricting SSH and RDP to Tailscale-only access.
 
         Differs from the VPS lockdown in two ways:
           - No countdown / SSH-disconnect drama — you're sitting at the machine
@@ -577,7 +649,7 @@ polkit.addRule(function(action, subject) {
         print(f"\n{Colors.HEADER}=== FIREWALL LOCKDOWN ==={Colors.ENDC}")
 
         print(f"""
-{Colors.CYAN}This will configure UFW so that SSH (22) and RDP (3389) connections
+{Colors.CYAN}This will configure {self.plat.firewall_name} so that SSH (22) and RDP (3389) connections
 are only accepted from your Tailscale network. Direct internet access
 to those ports will be blocked.
 
@@ -596,28 +668,30 @@ only affects incoming network connections.{Colors.ENDC}
 
         self.log("Applying firewall rules...")
 
-        # Ensure IPv6 filtering is enabled
-        self.run_command("sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw", check=False)
-        r = self.run_command("grep -c '^IPV6=' /etc/default/ufw", check=False)
-        if r.stdout.strip() == "0":
-            self.run_command("echo 'IPV6=yes' >> /etc/default/ufw")
-
-        self.run_command("ufw --force reset")
-        self.run_command("ufw default deny incoming")
-        self.run_command("ufw default allow outgoing")
-        self.run_command("ufw allow in on tailscale0")
-        self.run_command("ufw allow out on tailscale0")
+        # Firewall lockdown via the platform back-end (ufw on Debian,
+        # firewalld on RHEL). IPv6 is handled inside reset() where relevant.
+        fw = self.plat.firewall
+        fw.reset()
+        fw.default_deny_incoming()
+        fw.trust_interface("tailscale0")
 
         for subnet in ("100.64.0.0/10", "fd7a:115c:a1e0::/48"):
-            self.run_command(f"ufw allow from {subnet} to any port 22")
-            self.run_command(f"ufw allow from {subnet} to any port 3389")
+            fw.allow_from_to_port(subnet, 22)
+            fw.allow_from_to_port(subnet, 3389)
 
-        self.run_command("ufw --force enable")
+        fw.enable()
         self.log("Firewall locked down to Tailscale-only access", "SUCCESS")
         self._save_state(server_locked_down=True)
         return True
 
     # ── Applications ──────────────────────────────────────────────────────────
+
+    def install_agent(self):
+        """Install the selected AI agent (OpenClaw or Hermes Agent)."""
+        if self.agent_type == "hermes":
+            self.install_hermes()
+        else:
+            self.install_openclaw()
 
     def install_openclaw(self):
         if self._step_done("openclaw_installed"):
@@ -644,8 +718,7 @@ only affects incoming network connections.{Colors.ENDC}
         self.log("Installing Node.js and build tools...")
         print(f"\n  {Colors.WARNING}{Colors.BOLD}⚠  Note:{Colors.ENDC}{Colors.WARNING} This step can take 2–3 minutes and may appear to hang.{Colors.ENDC}")
         print(f"  {Colors.WARNING}   If progress stops, press Enter a few times to continue.{Colors.ENDC}\n")
-        self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
-        self.run_command("apt-get install -y nodejs build-essential cmake make g++ python3")
+        self.plat.install_node("22")
 
         self.log("Running official OpenClaw installer...")
         self.run_command(
@@ -658,6 +731,52 @@ only affects incoming network connections.{Colors.ENDC}
         self.run_command(f"loginctl enable-linger {self.install_user}")
         self.log("OpenClaw installed and gateway service registered", "SUCCESS")
         self._save_state(openclaw_installed=True)
+
+    def _hermes_command_paths(self, install_user):
+        """Candidate locations for the `hermes` command, per the installer's
+        own resolve_install_layout(): FHS layout (/usr/local/bin) for a fresh
+        root install, ~/.local/bin otherwise — including a root install that
+        reused a pre-existing legacy checkout, which keeps the non-root-style
+        command dir even when running as root. Checking these paths directly
+        avoids depending on `su - user`'s login-shell PATH picking up
+        ~/.local/bin, which isn't guaranteed for every account/shell-rc
+        combination."""
+        if install_user == "root":
+            return ["/usr/local/bin/hermes", "/root/.local/bin/hermes"]
+        return [f"/home/{install_user}/.local/bin/hermes"]
+
+    def install_hermes(self):
+        if self._step_done("hermes_installed"):
+            self.log("Hermes Agent already installed — skipping", "SUCCESS")
+            return
+
+        print(f"\n{Colors.HEADER}=== HERMES AGENT INSTALLATION ==={Colors.ENDC}")
+
+        if not self.install_user:
+            self.log("No install user set — skipping Hermes Agent", "WARNING")
+            return
+
+        # Pre-install Node.js as root — Hermes' installer can manage its own,
+        # but a system Node avoids the extra download when it's new enough.
+        self.log("Installing Node.js and build tools...")
+        print(f"\n  {Colors.WARNING}{Colors.BOLD}⚠  Note:{Colors.ENDC}{Colors.WARNING} This step can take 2–3 minutes and may appear to hang.{Colors.ENDC}")
+        print(f"  {Colors.WARNING}   If progress stops, press Enter a few times to continue.{Colors.ENDC}\n")
+        self.plat.install_node("22")
+
+        # --skip-setup defers API-key / messaging-platform configuration to a
+        # later `hermes setup` run (parallels OpenClaw's --no-onboard);
+        # --non-interactive keeps optional prompts from blocking without a TTY.
+        self.log("Running official Hermes Agent installer...")
+        self.run_command(
+            f"su - {self.install_user} -c "
+            f"'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | "
+            f"bash -s -- --skip-setup --non-interactive'",
+            capture_output=False
+        )
+
+        self.run_command(f"loginctl enable-linger {self.install_user}")
+        self.log("Hermes Agent installed", "SUCCESS")
+        self._save_state(hermes_installed=True)
 
     def install_homebrew(self):
         """Pre-install Homebrew so OpenClaw skills install correctly during onboarding"""
@@ -681,7 +800,7 @@ only affects incoming network connections.{Colors.ENDC}
 
         self.log("Installing Homebrew (required for OpenClaw skills)...")
         # Extra deps Homebrew needs on Linux beyond what we already installed
-        self.run_command("apt-get install -y -qq file procps")
+        self.plat.pkg_install("file", "procps-ng" if self.plat.is_rhel else "procps")
 
         # Pre-create the Homebrew prefix as root and give the user ownership
         # so the installer doesn't need sudo to create /home/linuxbrew
@@ -717,32 +836,13 @@ only affects incoming network connections.{Colors.ENDC}
 
         print(f"\n{Colors.HEADER}=== GOOGLE CHROME INSTALLATION ==={Colors.ENDC}")
 
-        r = self.run_command("dpkg -l | grep google-chrome", check=False)
-        if r.returncode == 0:
+        if self.plat.pkg_installed("google-chrome-stable"):
             self.log("Chrome already installed", "SUCCESS")
             self._save_state(chrome_installed=True)
             return
 
-        try:
-            self.run_command(
-                "wget -q -O /tmp/chrome.deb "
-                "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
-            )
-            self.run_command("apt-get install -y /tmp/chrome.deb")
-            self.run_command("rm -f /tmp/chrome.deb")
-        except subprocess.CalledProcessError:
-            self.log("Fallback: installing Chrome via repository...", "WARNING")
-            self.run_command(
-                "wget -q -O /usr/share/keyrings/google-chrome.gpg "
-                "https://dl.google.com/linux/linux_signing_key.pub"
-            )
-            self.run_command(
-                'echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] '
-                'http://dl.google.com/linux/chrome/deb/ stable main" '
-                '> /etc/apt/sources.list.d/google-chrome.list'
-            )
-            self.run_command("apt-get update")
-            self.run_command("apt-get install -y google-chrome-stable")
+        # deb fast-path + repo fallback on Debian, official .rpm on RHEL
+        self.plat.install_chrome()
 
         r = self.run_command("google-chrome --version")
         self.log(f"Chrome installed: {r.stdout.strip()}", "SUCCESS")
@@ -822,6 +922,33 @@ WantedBy=timers.target
 
         print(f"\n{Colors.HEADER}=== SECURITY CHECK TOOL ==={Colors.ENDC}")
 
+        # Firewall verify + auto-fix fragments selected for the host stack
+        # (ufw on Debian, firewalld on RHEL); shared with the VPS scripts.
+        fw_check, fw_fix = self.plat.security_check_firewall_fragments()
+
+        if self.agent_type == "hermes":
+            hermes_test = " || ".join(
+                f'[ -x "{p}" ]' for p in self._hermes_command_paths(self.install_user or "root")
+            )
+            agent_check = f"""
+section "Hermes Agent"
+if {hermes_test}; then
+    pass "Hermes Agent is installed"
+    info "Manage the gateway (messaging/background service) with: hermes gateway install"
+else
+    warn "Hermes Agent does not appear to be installed"
+fi
+"""
+        else:
+            agent_check = r"""
+section "OpenClaw"
+if systemctl is-active --quiet openclaw; then
+    pass "OpenClaw service is running"
+else
+    warn "OpenClaw service is not running"; RESTART_SVCS+=("openclaw")
+fi
+"""
+
         # The security-check script itself is identical to the VPS version
         security_script = r"""#!/bin/bash
 # SecureClaw Security Verification
@@ -842,7 +969,7 @@ fix_ok()  { echo -e "    ${GREEN}✓  $1${RESET}"; }
 fix_err() { echo -e "    ${RED}✗  $1${RESET}"; }
 
 ISSUES=0
-FIX_UFW=0; FIX_UFW6=0; FIX_TS_RULE=0; FIX_SSH_RULE=0; FIX_RDP_RULE=0
+FIX_FW=0; FIX_FW6=0; FIX_TS_RULE=0; FIX_SSH_RULE=0; FIX_RDP_RULE=0
 RESTART_SVCS=()
 
 clear
@@ -852,43 +979,7 @@ echo -e "${BOLD}  ║        🦞  SecureClaw Security Verification             
 echo -e "${BOLD}  ║        $(date '+%Y-%m-%d %H:%M:%S')                                 ║${RESET}"
 echo -e "${BOLD}  ╚══════════════════════════════════════════════════════════════╝${RESET}"
 
-section "Firewall (UFW)"
-ufw_out=$(ufw status verbose 2>/dev/null)
-if echo "$ufw_out" | grep -q "Status: active"; then
-    pass "UFW is active"
-else
-    fail "UFW is NOT active — machine is unprotected!"; FIX_UFW=1
-fi
-if grep -q "^IPV6=yes" /etc/default/ufw 2>/dev/null; then
-    pass "UFW IPv6 filtering is enabled"
-else
-    fail "UFW IPv6 filtering is disabled"; FIX_UFW6=1
-fi
-if echo "$ufw_out" | grep -q "tailscale0"; then
-    pass "Tailscale interface rules present"
-else
-    fail "Tailscale interface rules missing"; FIX_TS_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*22|22.*100\.64\.0\.0/10"; then
-    pass "SSH (22) restricted to Tailscale IPv4 subnet"
-else
-    fail "SSH (22) does not have a Tailscale IPv4 rule"; FIX_SSH_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "fd7a:115c:a1e0::/48.*22|22.*fd7a:115c:a1e0::/48"; then
-    pass "SSH (22) restricted to Tailscale IPv6 subnet"
-else
-    fail "SSH (22) does not have a Tailscale IPv6 rule"; FIX_SSH_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*3389|3389.*100\.64\.0\.0/10"; then
-    pass "RDP (3389) restricted to Tailscale IPv4 subnet"
-else
-    fail "RDP (3389) does not have a Tailscale IPv4 rule"; FIX_RDP_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "fd7a:115c:a1e0::/48.*3389|3389.*fd7a:115c:a1e0::/48"; then
-    pass "RDP (3389) restricted to Tailscale IPv6 subnet"
-else
-    fail "RDP (3389) does not have a Tailscale IPv6 rule"; FIX_RDP_RULE=1
-fi
+""" + fw_check + r"""
 
 section "Tailscale VPN"
 ts_ip=$(tailscale ip -4 2>/dev/null)
@@ -903,10 +994,10 @@ section "SSH (port 22)"
 ssh_listen=$(ss -tlnp 2>/dev/null | grep ':22 ')
 if [ -n "$ssh_listen" ]; then
     if echo "$ssh_listen" | grep -qE "0\.0\.0\.0:22|\*:22|:::22"; then
-        if [ "$FIX_UFW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
-            pass "SSH listening on all interfaces — restricted by UFW to Tailscale subnet only"
+        if [ "$FIX_FW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
+            pass "SSH listening on all interfaces — restricted by the firewall to Tailscale subnet only"
         else
-            warn "SSH is listening on all interfaces and UFW rules need attention"
+            warn "SSH is listening on all interfaces and firewall rules need attention"
         fi
     else
         pass "SSH is bound to restricted interface only"
@@ -918,21 +1009,16 @@ fi
 section "RDP (port 3389)"
 rdp_listen=$(ss -tlnp 2>/dev/null | grep ':3389 ')
 if [ -n "$rdp_listen" ]; then
-    pass "XRDP is listening on port 3389"
-    info "Protected by UFW — only reachable via Tailscale (100.64.0.0/10)"
+    pass "RDP server is listening on port 3389"
+    info "Protected by firewall — only reachable via Tailscale (100.64.0.0/10)"
 else
-    warn "XRDP does not appear to be listening on 3389"
+    warn "RDP server does not appear to be listening on 3389"
 fi
 
-section "OpenClaw"
-if systemctl is-active --quiet openclaw; then
-    pass "OpenClaw service is running"
-else
-    warn "OpenClaw service is not running"; RESTART_SVCS+=("openclaw")
-fi
+""" + agent_check + r"""
 
 section "Services"
-for svc in xrdp tailscaled chrome-cleanup.timer; do
+for svc in @@RDP_SVC@@ tailscaled chrome-cleanup.timer; do
     if systemctl is-active --quiet "$svc"; then
         pass "$svc is running"
     else
@@ -953,11 +1039,11 @@ fi
 echo -e "  ${RED}${BOLD}  ✗  $ISSUES issue(s) found — review the output above.${RESET}"
 echo
 
-fixable=$((FIX_UFW + FIX_UFW6 + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
+fixable=$((FIX_FW + FIX_FW6 + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
 if [ "$fixable" -gt 0 ]; then
     echo -e "  ${CYAN}${BOLD}$fixable issue(s) can be fixed automatically:${RESET}"
-    [ "$FIX_UFW"      -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW"
-    [ "$FIX_UFW6"     -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW IPv6 filtering"
+    [ "$FIX_FW"      -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable firewall"
+    [ "$FIX_FW6"     -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable firewall IPv6 filtering"
     [ "$FIX_TS_RULE"  -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Add Tailscale interface rule"
     [ "$FIX_SSH_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict SSH to Tailscale subnets"
     [ "$FIX_RDP_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict RDP to Tailscale subnets"
@@ -971,28 +1057,10 @@ if [ "$fixable" -gt 0 ]; then
     if [[ "$fix_ans" =~ ^[Yy]$ ]]; then
         echo -e "  ${BOLD}Applying fixes...${RESET}"
         echo
-        ufw_changed=0
-        [ "$FIX_UFW"  -eq 1 ] && { ufw --force enable && fix_ok "UFW enabled" || fix_err "Failed to enable UFW"; ufw_changed=1; }
-        [ "$FIX_UFW6" -eq 1 ] && { sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw; grep -q '^IPV6=' /etc/default/ufw || echo 'IPV6=yes' >> /etc/default/ufw; fix_ok "UFW IPv6 enabled"; ufw_changed=1; }
-        [ "$FIX_TS_RULE" -eq 1 ] && { ufw allow in on tailscale0 && ufw allow out on tailscale0 && fix_ok "Tailscale rules added" || fix_err "Failed"; ufw_changed=1; }
-        if [ "$FIX_SSH_RULE" -eq 1 ]; then
-            ufw delete allow 22/tcp 2>/dev/null || true
-            ufw delete allow 22 2>/dev/null || true
-            ufw delete allow OpenSSH 2>/dev/null || true
-            ufw allow from 100.64.0.0/10 to any port 22 proto tcp && \
-            ufw allow from fd7a:115c:a1e0::/48 to any port 22 proto tcp && \
-                fix_ok "SSH restricted to Tailscale" || fix_err "Failed"
-            ufw_changed=1
-        fi
-        if [ "$FIX_RDP_RULE" -eq 1 ]; then
-            ufw delete allow 3389/tcp 2>/dev/null || true
-            ufw delete allow 3389 2>/dev/null || true
-            ufw allow from 100.64.0.0/10 to any port 3389 proto tcp && \
-            ufw allow from fd7a:115c:a1e0::/48 to any port 3389 proto tcp && \
-                fix_ok "RDP restricted to Tailscale" || fix_err "Failed"
-            ufw_changed=1
-        fi
-        [ "$ufw_changed" -eq 1 ] && { ufw --force reload && fix_ok "UFW reloaded" || fix_err "UFW reload failed"; }
+        fw_changed=0
+
+""" + fw_fix + r"""
+
         for svc in "${RESTART_SVCS[@]}"; do
             systemctl enable --now "$svc" 2>/dev/null && fix_ok "$svc started" || fix_err "Could not start $svc"
         done
@@ -1005,11 +1073,17 @@ fi
 
 read -rp "  Press Enter to close..."
 """
+        # Point the service check at the active RDP backend.
+        security_script = security_script.replace("@@RDP_SVC@@", self.plat.rdp_service)
+
         with open("/usr/local/bin/security-check", "w") as f:
             f.write(security_script)
         os.chmod("/usr/local/bin/security-check", 0o755)
 
-        # Terminal-agnostic launcher — xfce4-terminal won't exist on GNOME systems
+        # Terminal-agnostic launcher — xfce4-terminal won't exist on GNOME
+        # systems, and even within GNOME the default terminal app varies by
+        # version (gnome-terminal vs. the newer GNOME Console/kgx). Mirrors
+        # the candidate list in openclaw_widget.py's launch_in_terminal().
         launcher = """\
 #!/bin/bash
 # Launch security-check in the best available terminal emulator
@@ -1017,6 +1091,11 @@ if command -v xfce4-terminal &>/dev/null; then
     exec xfce4-terminal --title="SecureClaw Security Check" -e /usr/local/bin/security-check
 elif command -v gnome-terminal &>/dev/null; then
     exec gnome-terminal --title="SecureClaw Security Check" -- /usr/local/bin/security-check
+elif command -v kgx &>/dev/null; then
+    # kgx (GNOME Console) has no --title option (verified against its manpage)
+    exec kgx -e /usr/local/bin/security-check
+elif command -v konsole &>/dev/null; then
+    exec konsole --title "SecureClaw Security Check" -e /usr/local/bin/security-check
 elif command -v x-terminal-emulator &>/dev/null; then
     exec x-terminal-emulator -e /usr/local/bin/security-check
 else
@@ -1072,12 +1151,17 @@ Categories=System;Security;
             pass
         return "main"
 
-    def install_openclaw_widget(self):
+    def install_agent_widget(self):
+        """Install the AI agent control-panel desktop widget. The widget
+        (openclaw_widget.py) self-detects which agent is installed at
+        runtime and adapts its labels/commands accordingly — it's shared
+        between OpenClaw and Hermes, only the install artifact names
+        (openclaw-widget) stay as-is."""
         if self._step_done("widget_installed"):
-            self.log("OpenClaw widget already installed — skipping", "SUCCESS")
+            self.log("Control panel widget already installed — skipping", "SUCCESS")
             return
 
-        print(f"\n{Colors.HEADER}=== OPENCLAW CONTROL PANEL ==={Colors.ENDC}")
+        print(f"\n{Colors.HEADER}=== {self.agent_label.upper()} CONTROL PANEL ==={Colors.ENDC}")
 
         branch = self._get_repo_branch()
         self.log(f"Using branch: {branch}")
@@ -1085,17 +1169,21 @@ Categories=System;Security;
         raw_base = f"https://raw.githubusercontent.com/brandonbelew/secureclaw/{branch}"
         install_bin = "/usr/local/bin/openclaw-widget"
 
-        self.run_command(f"wget -q -O {install_bin} {raw_base}/ubuntu/openclaw_widget.py")
+        self.run_command(f'wget -q -O {install_bin} "{raw_base}/ubuntu/openclaw_widget.py?$(date +%s)"')
         os.chmod(install_bin, 0o755)
         self.run_command(
             f"sed -i 's/^REPO_BRANCH_OVERRIDE = None.*$/REPO_BRANCH_OVERRIDE = \"{branch}\"/' {install_bin}"
         )
 
-        self.run_command("apt-get install -y python3-gi gir1.2-gtk-3.0")
+        self.plat.pkg_install("gobject_gtk3", logical=True)
 
+        # Passwordless firewall-status check for the widget; group + command
+        # differ by distro (sudo/ufw vs wheel/firewall-cmd).
+        admin = self.plat.admin_group
+        fw_status_cmd = "/usr/sbin/ufw status" if self.plat.is_debian else "/usr/bin/firewall-cmd --state"
         sudoers_content = (
-            "# Allow sudo group to check UFW status without password (used by openclaw-widget)\n"
-            "%sudo ALL=(ALL) NOPASSWD: /usr/sbin/ufw status\n"
+            "# Allow admins to check firewall status without password (used by openclaw-widget)\n"
+            f"%{admin} ALL=(ALL) NOPASSWD: {fw_status_cmd}\n"
         )
         sudoers_path = "/etc/sudoers.d/openclaw-widget"
         with open(sudoers_path, "w") as f:
@@ -1106,8 +1194,8 @@ Categories=System;Security;
         app_dir.mkdir(parents=True, exist_ok=True)
         desktop_content = (
             "[Desktop Entry]\n"
-            "Name=OpenClaw Control Panel\n"
-            "Comment=OpenClaw service status and launcher\n"
+            f"Name={self.agent_label} Control Panel\n"
+            f"Comment={self.agent_label} service status and launcher\n"
             "Exec=/usr/local/bin/openclaw-widget\n"
             "Icon=network-server\n"
             "Terminal=false\n"
@@ -1134,7 +1222,7 @@ Categories=System;Security;
             self.run_command(f"chown {username}:{username} {shortcut}")
             self.log(f"Autostart + desktop shortcut created for {username}", "SUCCESS")
 
-        self.log("OpenClaw Control Panel installed", "SUCCESS")
+        self.log(f"{self.agent_label} Control Panel installed", "SUCCESS")
         self._save_state(widget_installed=True)
 
     def create_user_shortcuts(self):
@@ -1157,7 +1245,7 @@ Categories=System;Security;
                 "url": "https://docs.openclaw.ai/tools/browser",
                 "icon": "text-html",
             },
-        ]
+        ] if self.agent_type == "openclaw" else []
 
         for user_dir in _real_user_homes():
             username = user_dir.name
@@ -1228,13 +1316,21 @@ Categories=System;Security;
             chrome_ver = "Installation failed"
 
         try:
-            r = self.run_command("systemctl is-active openclaw", check=False)
-            oc_status = "Running" if r.stdout.strip() == "active" else "Installed (service not active)"
+            if self.agent_type == "hermes":
+                hermes_paths = self._hermes_command_paths(self.install_user or "root")
+                agent_status = "Installed" \
+                    if any(os.access(p, os.X_OK) for p in hermes_paths) else "Installation failed"
+            else:
+                r = self.run_command("systemctl is-active openclaw", check=False)
+                agent_status = "Running" if r.stdout.strip() == "active" else "Installed (service not active)"
         except Exception:
-            oc_status = "Unknown"
+            agent_status = "Unknown"
+
+        rdp_label = ("GNOME Remote Desktop" if self.rdp_backend == "grd"
+                     else "xrdp (remote desktop server)")
 
         report = f"""
-{Colors.GREEN}{Colors.BOLD}LOCAL UBUNTU SETUP COMPLETED!{Colors.ENDC}
+{Colors.GREEN}{Colors.BOLD}LOCAL DESKTOP SETUP COMPLETE!{Colors.ENDC}
 
 {Colors.CYAN}Summary:{Colors.ENDC}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1244,8 +1340,8 @@ Categories=System;Security;
 {Colors.BOLD}Tailscale IP:{Colors.ENDC}  {tailscale_ip}
 
 {Colors.BOLD}Installed:{Colors.ENDC}
-• xrdp (remote desktop server)
-• OpenClaw AI: {oc_status}
+• {rdp_label}
+• {self.agent_label}: {agent_status}
 • Google Chrome: {chrome_ver}
 
 {Colors.FAIL}{Colors.BOLD}╔══════════════════════════════════════════════════════════════╗
@@ -1267,7 +1363,7 @@ Categories=System;Security;
 1. {Colors.BOLD}Disable Tailscale key expiry{Colors.ENDC} (see above — do this first!)
 2. Install Tailscale on your other devices (tailscale.com/download)
    Sign in with the same account to reach this machine remotely
-3. Run OpenClaw onboarding: {Colors.BOLD}openclaw onboard{Colors.ENDC}
+3. Run {self.agent_label} onboarding: {Colors.BOLD}{self.agent_onboard_cmd}{Colors.ENDC}
 4. RDP into this machine from any Tailscale device:
    Address: {Colors.BOLD}{tailscale_ip}:3389{Colors.ENDC}
 
@@ -1286,7 +1382,7 @@ Categories=System;Security;
     def run_setup(self):
         print(f"{Colors.HEADER}{Colors.BOLD}")
         print("=" * 60)
-        print("    SecureClaw Local Ubuntu 24.04 Setup")
+        print("    SecureClaw Local Desktop Setup")
         print("=" * 60)
         print(f"{Colors.ENDC}")
 
@@ -1294,7 +1390,7 @@ Categories=System;Security;
         print("  • Configure xrdp for remote desktop access")
         print("  • Install and authenticate Tailscale VPN")
         print("  • Apply Tailscale-only firewall rules")
-        print("  • Install OpenClaw AI and Google Chrome")
+        print(f"  • Install {self.agent_label} and Google Chrome")
         print("  • Set up desktop shortcuts and the Control Panel widget")
         print()
 
@@ -1316,7 +1412,7 @@ Categories=System;Security;
         state = self._load_state()
         completed = [
             k for k, v in state.items()
-            if v and k not in ("desktop_type", "install_user", "tailscale_ip")
+            if v and k not in ("desktop_type", "install_user", "tailscale_ip", "agent_type")
         ]
         if completed:
             print(f"\n{Colors.GREEN}Resuming — steps already completed:{Colors.ENDC}")
@@ -1329,6 +1425,7 @@ Categories=System;Security;
             self.detect_and_record_desktop()
             self.setup_xrdp()
             self.select_install_user()
+            self.configure_grd()
             self.install_tailscale()
 
             if self.configure_tailscale():
@@ -1336,16 +1433,26 @@ Categories=System;Security;
             else:
                 print(f"{Colors.WARNING}Continuing without Tailscale / firewall lockdown.{Colors.ENDC}")
 
-            self.install_openclaw()
-            self.install_homebrew()
+            self.install_agent()
+            if self.agent_type == "openclaw":
+                self.install_homebrew()
             self.install_chrome()
             self.install_chrome_cleanup()
             self.install_security_check()
-            self.install_openclaw_widget()
+            self.install_agent_widget()
             self.create_user_shortcuts()
             self.create_final_report()
 
             print(f"\n{Colors.GREEN}{Colors.BOLD}All setup tasks completed!{Colors.ENDC}\n")
+
+            # GNOME Remote Desktop only comes up cleanly on a fresh boot.
+            if self.grd_needs_reboot:
+                print(f"{Colors.WARNING}{Colors.BOLD}  A reboot is required to activate remote desktop (GNOME Remote Desktop).{Colors.ENDC}")
+                ans = input(f"{Colors.CYAN}  Reboot now? [Y/n] > {Colors.ENDC}").strip().lower()
+                if ans in ("", "y", "yes"):
+                    self.run_command("systemctl reboot", check=False)
+                else:
+                    print(f"{Colors.WARNING}  Remember to reboot before connecting via RDP.{Colors.ENDC}")
 
         except KeyboardInterrupt:
             print(f"\n{Colors.WARNING}Setup interrupted. Re-run to resume.{Colors.ENDC}")

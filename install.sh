@@ -1,6 +1,6 @@
 #!/bin/bash
 # SecureClaw Setup Installer
-# Supports both VPS/remote-server installs and local Ubuntu desktop installs.
+# Supports both VPS/remote-server installs and local desktop installs.
 
 set -e
 
@@ -9,6 +9,10 @@ BRANCH="${1:-main}"
 if [[ "$BRANCH" != "main" && "$BRANCH" != "dev" ]]; then
     BRANCH="main"
 fi
+
+# ── Repo source (change these when forking) ───────────────────────────────────
+REPO_OWNER="brandonbelew"
+REPO_NAME="secureclaw"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RESET=$'\033[0m'
@@ -79,9 +83,16 @@ check_root() {
     fi
 }
 
-check_ubuntu() {
-    if ! command -v apt &> /dev/null; then
-        print_error "This installer only supports Ubuntu/Debian systems."
+# Detects the host package manager and exports PKG_FAMILY ("debian" or "rhel").
+# SecureClaw targets Ubuntu/Debian but also supports RHEL-family systems
+# (Fedora, Rocky, AlmaLinux) via the platform abstraction in the Python scripts.
+check_supported() {
+    if command -v apt-get &> /dev/null; then
+        PKG_FAMILY="debian"
+    elif command -v dnf &> /dev/null; then
+        PKG_FAMILY="rhel"
+    else
+        print_error "Unsupported system: need apt (Debian/Ubuntu) or dnf (Fedora/RHEL/Rocky)."
         exit 1
     fi
 }
@@ -117,8 +128,8 @@ detect_mode() {
     echo
     echo -e "  ${CYAN}  1.${RESET}  ${BOLD}VPS / remote server${RESET}"
     echo -e "       ${DIM}SSH or cloud provider — fresh headless server${RESET}"
-    echo -e "  ${CYAN}  2.${RESET}  ${BOLD}Local Ubuntu desktop${RESET}"
-    echo -e "       ${DIM}Physically present at this machine — Ubuntu Desktop installed${RESET}"
+    echo -e "  ${CYAN}  2.${RESET}  ${BOLD}Local desktop${RESET}"
+    echo -e "       ${DIM}Physically present at this machine — desktop already installed${RESET}"
     echo
 
     if [[ "$SETUP_MODE" == "local" ]]; then
@@ -139,15 +150,49 @@ detect_mode() {
     esac
 }
 
+# ── Agent selection ───────────────────────────────────────────────────────────
+# Sets AGENT_TYPE="openclaw" or "hermes". Threaded through to the Python setup
+# scripts via SECURECLAW_AGENT so the RDP/Tailscale/firewall pipeline stays
+# shared and only the AI-agent install step branches.
+detect_agent() {
+    echo
+    print_divider
+    echo
+    echo -e "  ${CYAN}${BOLD}Select AI agent to install:${RESET}"
+    echo
+    echo -e "  ${CYAN}  1.${RESET}  ${BOLD}OpenClaw${RESET}"
+    echo -e "       ${DIM}openclaw.ai${RESET}"
+    echo -e "  ${CYAN}  2.${RESET}  ${BOLD}Hermes Agent${RESET}"
+    echo -e "       ${DIM}Nous Research — hermes-agent.nousresearch.com${RESET}"
+    echo
+
+    read -rp "  Enter choice [1]: " agent_choice
+    agent_choice="${agent_choice:-1}"
+
+    case "$agent_choice" in
+        2) AGENT_TYPE="hermes"   ;;
+        *) AGENT_TYPE="openclaw" ;;
+    esac
+}
+
 # ── Steps ─────────────────────────────────────────────────────────────────────
 install_python() {
     print_step 2 4 "Installing Python and dependencies...    "
-    if ! command -v python3 &> /dev/null; then
-        apt-get update -qq
-        apt-get install -y -qq python3 python3-pip python3-tk > /dev/null 2>&1
+    if [[ "$PKG_FAMILY" == "rhel" ]]; then
+        # tkinter ships as python3-tkinter on RHEL family
+        if ! command -v python3 &> /dev/null; then
+            dnf -y install python3 python3-pip python3-tkinter > /dev/null 2>&1
+        else
+            dnf -y install python3-tkinter > /dev/null 2>&1
+        fi
     else
-        # Ensure tkinter is present even if python3 was pre-installed
-        apt-get install -y -qq python3-tk > /dev/null 2>&1
+        if ! command -v python3 &> /dev/null; then
+            apt-get update -qq
+            apt-get install -y -qq python3 python3-pip python3-tk > /dev/null 2>&1
+        else
+            # Ensure tkinter is present even if python3 was pre-installed
+            apt-get install -y -qq python3-tk > /dev/null 2>&1
+        fi
     fi
     print_ok
 }
@@ -164,6 +209,9 @@ install_scripts() {
     fi
 
     if [[ -n "$SCRIPT_DIR" ]]; then
+        # platform_support.py is the shared distro-abstraction module imported
+        # by the setup scripts — it must sit beside them in /usr/local/bin.
+        cp "$SCRIPT_DIR/platform_support.py" /usr/local/bin/
         cp "$SCRIPT_DIR/universal_vps_setup.py" /usr/local/bin/
         cp "$SCRIPT_DIR/post_lockdown_setup.py" /usr/local/bin/
         chmod +x /usr/local/bin/universal_vps_setup.py
@@ -174,10 +222,15 @@ install_scripts() {
         fi
     else
         # Repo not available locally — download from GitHub
-        REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
+        REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
         if ! command -v curl &> /dev/null; then
-            apt-get install -y -qq curl > /dev/null 2>&1
+            if [[ "$PKG_FAMILY" == "rhel" ]]; then
+                dnf -y install curl > /dev/null 2>&1
+            else
+                apt-get install -y -qq curl > /dev/null 2>&1
+            fi
         fi
+        curl -fsSL "$REPO_BASE/ubuntu/platform_support.py" -o /usr/local/bin/platform_support.py
         curl -fsSL "$REPO_BASE/ubuntu/universal_vps_setup.py" -o /usr/local/bin/universal_vps_setup.py
         curl -fsSL "$REPO_BASE/ubuntu/post_lockdown_setup.py" -o /usr/local/bin/post_lockdown_setup.py
         chmod +x /usr/local/bin/universal_vps_setup.py
@@ -194,36 +247,53 @@ install_scripts() {
 create_shortcuts() {
     print_step 4 4 "Creating shortcuts...                    "
 
+    # On RHEL/Fedora, sudo's secure_path excludes /usr/local/bin (Ubuntu's
+    # includes it), so `sudo vps-post-setup` fails with "command not found".
+    # Add /usr/local/bin to secure_path so the documented commands work.
+    if [[ "$PKG_FAMILY" == "rhel" ]]; then
+        cat > /etc/sudoers.d/secureclaw-path << 'SUDOEOF'
+Defaults secure_path = /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+SUDOEOF
+        chmod 440 /etc/sudoers.d/secureclaw-path
+    fi
+
     cat > /usr/local/bin/vps-setup << EOF
 #!/bin/bash
-REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
+REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
+curl -fsSL "\$REPO_BASE/ubuntu/platform_support.py?\$(date +%s)" -o /usr/local/bin/platform_support.py || true
 curl -fsSL "\$REPO_BASE/ubuntu/universal_vps_setup.py?\$(date +%s)" -o /usr/local/bin/universal_vps_setup.py \
     && chmod +x /usr/local/bin/universal_vps_setup.py \
     || echo "  Warning: could not fetch latest script, running cached version"
+export SECURECLAW_BRANCH="${BRANCH}"
+export SECURECLAW_AGENT="${AGENT_TYPE}"
 python3 /usr/local/bin/universal_vps_setup.py "\$@"
 EOF
 
     cat > /usr/local/bin/vps-post-setup << EOF
 #!/bin/bash
-REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
+REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
+curl -fsSL "\$REPO_BASE/ubuntu/platform_support.py?\$(date +%s)" -o /usr/local/bin/platform_support.py || true
 if curl -fsSL "\$REPO_BASE/ubuntu/post_lockdown_setup.py?\$(date +%s)" -o /usr/local/bin/post_lockdown_setup.py; then
     chmod +x /usr/local/bin/post_lockdown_setup.py
     sed -i 's/^REPO_BRANCH_OVERRIDE = None.*\$/REPO_BRANCH_OVERRIDE = "${BRANCH}"/' /usr/local/bin/post_lockdown_setup.py
 else
     echo "  Warning: could not fetch latest script, running cached version"
 fi
+export SECURECLAW_AGENT="${AGENT_TYPE}"
 python3 /usr/local/bin/post_lockdown_setup.py "\$@"
 EOF
 
     cat > /usr/local/bin/local-setup << EOF
 #!/bin/bash
-REPO_BASE="https://raw.githubusercontent.com/brandonbelew/secureclaw/${BRANCH}"
+REPO_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}"
+curl -fsSL "\$REPO_BASE/ubuntu/platform_support.py?\$(date +%s)" -o /usr/local/bin/platform_support.py || true
 if curl -fsSL "\$REPO_BASE/ubuntu/local_setup.py?\$(date +%s)" -o /usr/local/bin/local_setup.py; then
     chmod +x /usr/local/bin/local_setup.py
 else
     echo "  Warning: could not fetch latest script, running cached version"
 fi
 export SECURECLAW_BRANCH="${BRANCH}"
+export SECURECLAW_AGENT="${AGENT_TYPE}"
 python3 /usr/local/bin/local_setup.py "\$@"
 EOF
 
@@ -234,6 +304,14 @@ EOF
 }
 
 show_complete() {
+    if [[ "$AGENT_TYPE" == "hermes" ]]; then
+        AGENT_LABEL="Hermes Agent"
+        AGENT_ONBOARD_CMD="hermes setup"
+    else
+        AGENT_LABEL="OpenClaw AI assistant"
+        AGENT_ONBOARD_CMD="openclaw onboard"
+    fi
+
     if [[ "$SETUP_MODE" == "local" ]]; then
         show_complete_local
     else
@@ -251,7 +329,7 @@ show_complete_vps() {
     echo -e "  ${GREEN}  ✓${RESET}  Remote Desktop (RDP) access"
     echo -e "  ${GREEN}  ✓${RESET}  A dedicated user account with sudo access"
     echo -e "  ${GREEN}  ✓${RESET}  Tailscale VPN — secure remote access from anywhere"
-    echo -e "  ${GREEN}  ✓${RESET}  OpenClaw AI assistant — running as a background service"
+    echo -e "  ${GREEN}  ✓${RESET}  ${AGENT_LABEL} — running as a background service"
     echo -e "  ${GREEN}  ✓${RESET}  Google Chrome browser"
     echo
     print_divider
@@ -262,8 +340,9 @@ show_complete_vps() {
     echo -e "  ${CYAN}  2.${RESET}  You will create your RDP login username and password"
     echo -e "  ${CYAN}  3.${RESET}  You will be asked to authenticate Tailscale"
     echo -e "       ${DIM}(a link will appear — open it in your browser)${RESET}"
-    echo -e "  ${CYAN}  4.${RESET}  After lockdown, SSH will drop — reconnect via Tailscale"
-    echo -e "  ${CYAN}  5.${RESET}  Run ${YELLOW}sudo vps-post-setup${RESET} to finish the installation"
+    echo -e "  ${CYAN}  4.${RESET}  Everything installs in a single pass — ${AGENT_LABEL}, Chrome, lockdown"
+    echo -e "  ${CYAN}  5.${RESET}  The server locks down (and reboots if needed); reconnect over"
+    echo -e "       ${DIM}Tailscale and RDP in, then run: ${AGENT_ONBOARD_CMD}${RESET}"
     echo
     print_divider
     echo
@@ -279,7 +358,7 @@ show_complete_local() {
     echo -e "  ${GREEN}  ✓${RESET}  xrdp — remote desktop access via Tailscale"
     echo -e "  ${GREEN}  ✓${RESET}  Tailscale VPN — reach this machine from anywhere"
     echo -e "  ${GREEN}  ✓${RESET}  Tailscale-only firewall rules (SSH + RDP)"
-    echo -e "  ${GREEN}  ✓${RESET}  OpenClaw AI assistant — running as a background service"
+    echo -e "  ${GREEN}  ✓${RESET}  ${AGENT_LABEL} — running as a background service"
     echo -e "  ${GREEN}  ✓${RESET}  Google Chrome browser"
     echo
     print_divider
@@ -302,7 +381,7 @@ main() {
     print_banner
 
     check_root
-    check_ubuntu
+    check_supported
 
     # If stdin is not a terminal (e.g. curl | bash), reconnect to the
     # controlling terminal so interactive read prompts work. Falls back
@@ -312,6 +391,7 @@ main() {
     fi
 
     detect_mode
+    detect_agent
 
     print_divider
     echo

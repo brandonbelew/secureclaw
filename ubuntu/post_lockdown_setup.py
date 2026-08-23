@@ -10,11 +10,35 @@ import sys
 import subprocess
 import time
 import pwd
+import json
 from pathlib import Path
+from platform_support import Platform
 
 # Injected at install time by vps-post-setup shortcut via sed.
 # When None, _get_repo_branch() falls back to git detection.
 REPO_BRANCH_OVERRIDE = None  # injected at install time
+
+# Written by universal_vps_setup.py's __init__ — the authoritative record of
+# which agent a `vps-setup` run actually installed. Checked in preference to
+# SECURECLAW_AGENT, which is only set when this script is invoked through the
+# vps-post-setup wrapper (and only on wrappers regenerated after that env var
+# was introduced) — a direct `python3 post_lockdown_setup.py` invocation, or
+# an older cached wrapper, would otherwise silently default to "openclaw".
+VPS_SETUP_STATE_FILE = "/var/lib/vps-setup/state.json"
+
+
+def _get_agent_type():
+    """Which agent this server was actually set up with, if known."""
+    try:
+        with open(VPS_SETUP_STATE_FILE) as f:
+            agent = json.load(f).get("agent_type", "")
+        if agent in ("openclaw", "hermes"):
+            return agent
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    env_agent = os.environ.get("SECURECLAW_AGENT", "").strip().lower()
+    return env_agent if env_agent in ("openclaw", "hermes") else "openclaw"
+
 
 def _real_user_homes():
     """Yield Path objects for /home subdirs owned by real system users (uid >= 1000).
@@ -44,7 +68,24 @@ class Colors:
 class PostLockdownSetup:
     def __init__(self):
         self.setup_log = []
-        
+        self.os_info = self._detect_os_info()
+        # Distro abstraction (package manager, firewall, repos, group names)
+        self.plat = Platform(self.run_command, self.os_info)
+
+    def _detect_os_info(self):
+        """Read /etc/os-release and return a dict of OS metadata"""
+        info = {}
+        try:
+            with open("/etc/os-release") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line:
+                        k, _, v = line.partition("=")
+                        info[k] = v.strip('"')
+        except Exception:
+            pass
+        return info
+
     def log(self, message, level="INFO"):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         log_entry = f"[{timestamp}] {level}: {message}"
@@ -162,19 +203,18 @@ Current hostname: {Colors.BOLD}{current}{Colors.ENDC}
         """Verify server lockdown is working"""
         print(f"\n{Colors.HEADER}=== LOCKDOWN STATUS CHECK ==={Colors.ENDC}")
         
-        # Check UFW status
-        result = self.run_command("ufw status verbose")
-        if "Status: active" in result.stdout:
-            self.log("UFW firewall is active", "SUCCESS")
-            
+        # Check firewall status (ufw on Debian, firewalld on RHEL)
+        if self.plat.firewall_active():
+            self.log("Firewall is active", "SUCCESS")
+
             # Show current rules
-            rules = result.stdout
+            rules = self.plat.firewall_rules_text()
             if "100.64.0.0/10" in rules:
                 self.log("Tailscale subnet rules are active", "SUCCESS")
             else:
                 self.log("Tailscale subnet rules not found", "WARNING")
         else:
-            self.log("UFW firewall is not active!", "ERROR")
+            self.log("Firewall is not active!", "ERROR")
         
         # Check SSH configuration
         try:
@@ -229,8 +269,7 @@ Current hostname: {Colors.BOLD}{current}{Colors.ENDC}
         self.log("Installing Node.js and build tools...")
         print(f"\n  {Colors.WARNING}{Colors.BOLD}⚠  Note:{Colors.ENDC}{Colors.WARNING} This step can take 2–3 minutes and may appear to hang.{Colors.ENDC}")
         print(f"  {Colors.WARNING}   If progress stops, press Enter a few times to continue.{Colors.ENDC}\n")
-        self.run_command("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -")
-        self.run_command("apt-get install -y nodejs build-essential cmake make g++ python3")
+        self.plat.install_node("22")
 
         # Run the official OpenClaw installer as the target user.
         # Node.js is already present so the installer skips the sudo step.
@@ -264,7 +303,7 @@ Current hostname: {Colors.BOLD}{current}{Colors.ENDC}
 
         self.log("Installing Homebrew (required for OpenClaw skills)...")
         # Extra deps Homebrew needs on Linux beyond what we already installed
-        self.run_command("apt-get install -y -qq file procps")
+        self.plat.pkg_install("file", "procps-ng" if self.plat.is_rhel else "procps")
 
         # Pre-create the Homebrew prefix as root and give the user ownership
         # so the installer doesn't need sudo to create /home/linuxbrew
@@ -298,36 +337,15 @@ Current hostname: {Colors.BOLD}{current}{Colors.ENDC}
         self.log("Installing Google Chrome...")
         
         # Check if already installed
-        result = self.run_command("dpkg -l | grep google-chrome", check=False)
-        if result.returncode == 0:
+        if self.plat.pkg_installed("google-chrome-stable"):
             self.log("Google Chrome is already installed", "SUCCESS")
             return
-        
-        # Download and install Chrome
-        try:
-            # Download Chrome .deb package
-            self.log("Downloading Chrome package...")
-            self.run_command("wget -q -O /tmp/google-chrome-stable_current_amd64.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb")
-            
-            # Install Chrome
-            self.log("Installing Chrome package...")
-            self.run_command("apt install -y /tmp/google-chrome-stable_current_amd64.deb")
-            
-            # Clean up
-            self.run_command("rm -f /tmp/google-chrome-stable_current_amd64.deb")
-            
-        except subprocess.CalledProcessError:
-            # Fallback method using repository
-            self.log("Fallback: Installing Chrome via repository...", "WARNING")
 
-            # Add Google Chrome repository key and source
-            self.run_command("wget -q -O /usr/share/keyrings/google-chrome.gpg https://dl.google.com/linux/linux_signing_key.pub")
-            self.run_command('echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list')
-            
-            # Update and install
-            self.run_command("apt update")
-            self.run_command("apt install -y google-chrome-stable")
-        
+        # Download and install Chrome (deb fast-path + repo fallback on Debian,
+        # official .rpm on RHEL).
+        self.log("Downloading Chrome package...")
+        self.plat.install_chrome()
+
         # Verify installation
         result = self.run_command("google-chrome --version")
         self.log(f"Chrome installed: {result.stdout.strip()}", "SUCCESS")
@@ -336,6 +354,12 @@ Current hostname: {Colors.BOLD}{current}{Colors.ENDC}
         """Install the desktop security verification script"""
         print(f"\n{Colors.HEADER}=== SECURITY CHECK TOOL ==={Colors.ENDC}")
         self.log("Installing security check tool...")
+
+        # Firewall verify + auto-fix fragments selected for the host stack
+        # (ufw on Debian, firewalld on RHEL). Both honour the same contract:
+        # populate $fw_out and set FIX_FW / FIX_FW6 / FIX_TS_RULE /
+        # FIX_SSH_RULE / FIX_RDP_RULE.
+        fw_check, fw_fix = self.plat.security_check_firewall_fragments()
 
         script = r"""#!/bin/bash
 # SecureClaw Security Verification
@@ -357,8 +381,8 @@ fix_ok()  { echo -e "    ${GREEN}✓  $1${RESET}"; }
 fix_err() { echo -e "    ${RED}✗  $1${RESET}"; }
 
 ISSUES=0
-FIX_UFW=0
-FIX_UFW6=0
+FIX_FW=0
+FIX_FW6=0
 FIX_TS_RULE=0
 FIX_SSH_RULE=0
 FIX_RDP_RULE=0
@@ -371,44 +395,7 @@ echo -e "${BOLD}  ║        🦞  SecureClaw Security Verification             
 echo -e "${BOLD}  ║        $(date '+%Y-%m-%d %H:%M:%S')                                 ║${RESET}"
 echo -e "${BOLD}  ╚══════════════════════════════════════════════════════════════╝${RESET}"
 
-# ── Firewall ──────────────────────────────────────────────────────────────────
-section "Firewall (UFW)"
-ufw_out=$(ufw status verbose 2>/dev/null)
-if echo "$ufw_out" | grep -q "Status: active"; then
-    pass "UFW is active"
-else
-    fail "UFW is NOT active — server is unprotected!"; FIX_UFW=1
-fi
-if grep -q "^IPV6=yes" /etc/default/ufw 2>/dev/null; then
-    pass "UFW IPv6 filtering is enabled"
-else
-    fail "UFW IPv6 filtering is disabled — IPv6 traffic may be unprotected!"; FIX_UFW6=1
-fi
-if echo "$ufw_out" | grep -q "tailscale0"; then
-    pass "Tailscale interface rules present"
-else
-    fail "Tailscale interface rules missing"; FIX_TS_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*22|22.*100\.64\.0\.0/10"; then
-    pass "SSH (22) restricted to Tailscale IPv4 subnet"
-else
-    fail "SSH (22) does not have a Tailscale IPv4 rule"; FIX_SSH_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "fd7a:115c:a1e0::/48.*22|22.*fd7a:115c:a1e0::/48"; then
-    pass "SSH (22) restricted to Tailscale IPv6 subnet"
-else
-    fail "SSH (22) does not have a Tailscale IPv6 rule"; FIX_SSH_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "100\.64\.0\.0/10.*3389|3389.*100\.64\.0\.0/10"; then
-    pass "RDP (3389) restricted to Tailscale IPv4 subnet"
-else
-    fail "RDP (3389) does not have a Tailscale IPv4 rule"; FIX_RDP_RULE=1
-fi
-if echo "$ufw_out" | grep -qE "fd7a:115c:a1e0::/48.*3389|3389.*fd7a:115c:a1e0::/48"; then
-    pass "RDP (3389) restricted to Tailscale IPv6 subnet"
-else
-    fail "RDP (3389) does not have a Tailscale IPv6 rule"; FIX_RDP_RULE=1
-fi
+""" + fw_check + r"""
 
 # ── Tailscale ─────────────────────────────────────────────────────────────────
 section "Tailscale VPN"
@@ -425,10 +412,10 @@ section "SSH (port 22)"
 ssh_listen=$(ss -tlnp 2>/dev/null | grep ':22 ')
 if [ -n "$ssh_listen" ]; then
     if echo "$ssh_listen" | grep -qE "0\.0\.0\.0:22|\*:22|:::22"; then
-        if [ "$FIX_UFW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
-            pass "SSH listening on all interfaces — access restricted by UFW to Tailscale subnet only"
+        if [ "$FIX_FW" -eq 0 ] && [ "$FIX_SSH_RULE" -eq 0 ]; then
+            pass "SSH listening on all interfaces — access restricted by the firewall to Tailscale subnet only"
         else
-            warn "SSH is listening on all interfaces and UFW rules need attention (see Firewall section)"
+            warn "SSH is listening on all interfaces and firewall rules need attention (see Firewall section)"
         fi
     else
         pass "SSH is bound to restricted interface only"
@@ -441,10 +428,10 @@ fi
 section "RDP (port 3389)"
 rdp_listen=$(ss -tlnp 2>/dev/null | grep ':3389 ')
 if [ -n "$rdp_listen" ]; then
-    pass "XRDP is listening on port 3389"
-    info "Protected by UFW — only reachable via Tailscale (100.64.0.0/10)"
+    pass "RDP server is listening on port 3389"
+    info "Protected by firewall — only reachable via Tailscale (100.64.0.0/10)"
 else
-    warn "XRDP does not appear to be listening on 3389"
+    warn "RDP server does not appear to be listening on 3389"
 fi
 
 # ── OpenClaw ──────────────────────────────────────────────────────────────────
@@ -454,10 +441,10 @@ if systemctl is-active --quiet openclaw; then
     oc_ports=$(ss -tlnp 2>/dev/null | grep -i openclaw | awk '{print $4}' | sed 's/.*://' | sort -u)
     if [ -n "$oc_ports" ]; then
         for port in $oc_ports; do
-            if echo "$ufw_out" | grep -q "$port"; then
-                pass "OpenClaw port $port has an explicit UFW rule"
+            if echo "$fw_out" | grep -q "$port"; then
+                pass "OpenClaw port $port has an explicit firewall rule"
             else
-                info "OpenClaw port $port — covered by UFW default deny incoming"
+                info "OpenClaw port $port — covered by the firewall's default-deny"
             fi
         done
     else
@@ -469,7 +456,7 @@ fi
 
 # ── Services ──────────────────────────────────────────────────────────────────
 section "Services"
-for svc in xrdp tailscaled chrome-cleanup.timer; do
+for svc in @@RDP_SVC@@ tailscaled chrome-cleanup.timer; do
     if systemctl is-active --quiet "$svc"; then
         pass "$svc is running"
     else
@@ -492,12 +479,12 @@ echo -e "  ${RED}${BOLD}  ✗  $ISSUES issue(s) found — review the output abov
 echo
 
 # ── Auto-fix ──────────────────────────────────────────────────────────────────
-fixable=$((FIX_UFW + FIX_UFW6 + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
+fixable=$((FIX_FW + FIX_FW6 + FIX_TS_RULE + FIX_SSH_RULE + FIX_RDP_RULE + ${#RESTART_SVCS[@]}))
 
 if [ "$fixable" -gt 0 ]; then
     echo -e "  ${CYAN}${BOLD}$fixable issue(s) can be fixed automatically:${RESET}"
-    [ "$FIX_UFW"      -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW"
-    [ "$FIX_UFW6"     -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable UFW IPv6 filtering"
+    [ "$FIX_FW"      -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable firewall"
+    [ "$FIX_FW6"     -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Enable firewall IPv6 filtering"
     [ "$FIX_TS_RULE"  -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Add Tailscale interface rule"
     [ "$FIX_SSH_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict SSH to Tailscale subnets (IPv4 + IPv6)"
     [ "$FIX_RDP_RULE" -eq 1 ] && echo -e "    ${YELLOW}→${RESET}  Restrict RDP to Tailscale subnets (IPv4 + IPv6)"
@@ -511,55 +498,9 @@ if [ "$fixable" -gt 0 ]; then
     if [[ "$fix_ans" =~ ^[Yy]$ ]]; then
         echo -e "  ${BOLD}Applying fixes...${RESET}"
         echo
-        ufw_changed=0
+        fw_changed=0
 
-        if [ "$FIX_UFW" -eq 1 ]; then
-            echo -e "  → Enabling UFW..."
-            ufw --force enable && fix_ok "UFW enabled" || fix_err "Failed to enable UFW"
-            ufw_changed=1
-        fi
-
-        if [ "$FIX_UFW6" -eq 1 ]; then
-            echo -e "  → Enabling UFW IPv6 filtering..."
-            sed -i 's/^IPV6=no/IPV6=yes/' /etc/default/ufw
-            grep -q '^IPV6=' /etc/default/ufw || echo 'IPV6=yes' >> /etc/default/ufw
-            fix_ok "UFW IPv6 filtering enabled"
-            ufw_changed=1
-        fi
-
-        if [ "$FIX_TS_RULE" -eq 1 ]; then
-            echo -e "  → Adding Tailscale interface rules..."
-            ufw allow in on tailscale0 && \
-            ufw allow out on tailscale0 && \
-            fix_ok "Tailscale interface rules added" || fix_err "Failed to add Tailscale rules"
-            ufw_changed=1
-        fi
-
-        if [ "$FIX_SSH_RULE" -eq 1 ]; then
-            echo -e "  → Restricting SSH to Tailscale subnets (IPv4 + IPv6)..."
-            ufw delete allow 22/tcp  2>/dev/null || true
-            ufw delete allow 22      2>/dev/null || true
-            ufw delete allow OpenSSH 2>/dev/null || true
-            ufw allow from 100.64.0.0/10       to any port 22 proto tcp && \
-            ufw allow from fd7a:115c:a1e0::/48 to any port 22 proto tcp && \
-                fix_ok "SSH restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict SSH"
-            ufw_changed=1
-        fi
-
-        if [ "$FIX_RDP_RULE" -eq 1 ]; then
-            echo -e "  → Restricting RDP to Tailscale subnets (IPv4 + IPv6)..."
-            ufw delete allow 3389/tcp 2>/dev/null || true
-            ufw delete allow 3389     2>/dev/null || true
-            ufw allow from 100.64.0.0/10       to any port 3389 proto tcp && \
-            ufw allow from fd7a:115c:a1e0::/48 to any port 3389 proto tcp && \
-                fix_ok "RDP restricted to Tailscale (IPv4 + IPv6)" || fix_err "Failed to restrict RDP"
-            ufw_changed=1
-        fi
-
-        if [ "$ufw_changed" -eq 1 ]; then
-            echo -e "  → Reloading UFW..."
-            ufw --force reload && fix_ok "UFW reloaded" || fix_err "UFW reload failed"
-        fi
+""" + fw_fix + r"""
 
         for svc in "${RESTART_SVCS[@]}"; do
             echo -e "  → Starting $svc..."
@@ -577,6 +518,10 @@ fi
 read -rp "  Press Enter to close..."
 """
 
+        # Point the service check at the active RDP backend (xrdp or
+        # gnome-remote-desktop).
+        script = script.replace("@@RDP_SVC@@", self.plat.rdp_service)
+
         with open("/usr/local/bin/security-check", "w") as f:
             f.write(script)
         os.chmod("/usr/local/bin/security-check", 0o755)
@@ -589,9 +534,9 @@ Version=1.0
 Type=Application
 Name=Security Check
 Comment=Verify firewall and security settings
-Exec=xfce4-terminal --title="SecureClaw Security Check" -e /usr/local/bin/security-check
+Exec=/usr/local/bin/security-check
 Icon=security-high
-Terminal=false
+Terminal=true
 Categories=System;Security;
 """
         for user_dir in _real_user_homes():
@@ -700,7 +645,7 @@ WantedBy=timers.target
         install_bin = "/usr/local/bin/openclaw-widget"
 
         # Download widget script
-        self.run_command(f"wget -q -O {install_bin} {widget_url}")
+        self.run_command(f'wget -q -O {install_bin} "{widget_url}?$(date +%s)"')
         os.chmod(install_bin, 0o755)
         # Inject branch so widget fetches manifest from the correct branch at runtime
         self.run_command(
@@ -709,19 +654,24 @@ WantedBy=timers.target
         self.log("Widget script downloaded and made executable", "SUCCESS")
 
         # Install GTK3 Python bindings (pre-installed on XFCE Ubuntu, but ensure present)
-        self.run_command("apt-get install -y python3-gi gir1.2-gtk-3.0")
+        self.plat.pkg_install("gobject_gtk3", logical=True)
         self.log("GTK3 Python bindings installed", "SUCCESS")
 
-        # Sudoers entry for passwordless UFW status check
+        # Sudoers entry for passwordless firewall status check (used by the
+        # widget). Path and admin group differ by distro:
+        #   Debian: %sudo  + /usr/sbin/ufw status
+        #   RHEL:   %wheel + firewall-cmd --state
+        admin = self.plat.admin_group
+        fw_status_cmd = "/usr/sbin/ufw status" if self.plat.is_debian else "/usr/bin/firewall-cmd --state"
         sudoers_content = (
-            "# Allow sudo group to check UFW status without password (used by openclaw-widget)\n"
-            "%sudo ALL=(ALL) NOPASSWD: /usr/sbin/ufw status\n"
+            "# Allow admins to check firewall status without password (used by openclaw-widget)\n"
+            f"%{admin} ALL=(ALL) NOPASSWD: {fw_status_cmd}\n"
         )
         sudoers_path = "/etc/sudoers.d/openclaw-widget"
         with open(sudoers_path, "w") as f:
             f.write(sudoers_content)
         os.chmod(sudoers_path, 0o440)
-        self.log("Sudoers entry written for UFW status check", "SUCCESS")
+        self.log("Sudoers entry written for firewall status check", "SUCCESS")
 
         # System-wide application menu entry
         desktop_dir = Path("/usr/local/share/applications")
@@ -875,10 +825,10 @@ WantedBy=timers.target
 • Tailscale IP: {tailscale_ip}
 • RDP Access: {tailscale_ip}:3389
 • SSH Access: ssh user@{tailscale_ip}
-• Firewall: UFW active (Tailscale-only access)
+• Firewall: {self.plat.firewall_name} active (Tailscale-only access)
 
 {Colors.BOLD}Installed Software:{Colors.ENDC}
-• RDP Server: XRDP with session persistence
+• RDP Server: {"GNOME Remote Desktop" if self.plat.remote_desktop_backend == "grd" else "xrdp with session persistence"}
 • OpenClaw: {openclaw_status}
 • Google Chrome: {chrome_version}
 
@@ -888,7 +838,7 @@ WantedBy=timers.target
 • Accessible via RDP connection
 
 {Colors.WARNING}Security Notes:{Colors.ENDC}
-Your server is hardened using Tailscale VPN and UFW firewall rules that
+Your server is hardened using Tailscale VPN and {self.plat.firewall_name} firewall rules that
 restrict SSH and RDP to the Tailscale subnet only. Tailscale is SOC 2
 Type II certified, end-to-end encrypted, and independently audited.
 
@@ -948,7 +898,19 @@ not a substitute for good security practices:
         print("    Post-Lockdown Setup Continuation")
         print("=" * 60)
         print(f"{Colors.ENDC}")
-        
+
+        # This legacy fallback only knows how to install OpenClaw. The
+        # single-pass vps-setup flow installs the chosen agent (OpenClaw or
+        # Hermes) up front and doesn't need this script at all any more — but
+        # it's still an installed command, so refuse rather than silently
+        # installing OpenClaw on top of a Hermes deployment.
+        if _get_agent_type() == "hermes":
+            print(f"{Colors.WARNING}This command only knows how to install OpenClaw, but this server "
+                  f"was set up with Hermes Agent.{Colors.ENDC}")
+            print(f"{Colors.WARNING}Nothing to do here — vps-setup already installed everything in a "
+                  f"single pass. Run  hermes setup  to finish configuring Hermes.{Colors.ENDC}")
+            return
+
         try:
             if not self.verify_tailscale_connection():
                 print(f"{Colors.FAIL}Tailscale connection could not be verified!{Colors.ENDC}")
