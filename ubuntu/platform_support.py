@@ -196,9 +196,19 @@ class Platform:
     def install_gnome_desktop(self):
         """Install a GNOME (Wayland) session + gnome-remote-desktop — the EL10
         remote-desktop stack. 'Server with GUI' is GNOME's server group, in the
-        base AppStream (no EPEL needed)."""
+        base AppStream (no EPEL needed).
+
+        'Server with GUI' does NOT include a terminal emulator — neither
+        gnome-terminal nor gnome-console/kgx is even packaged for EL10 (BaseOS/
+        AppStream/EPEL), confirmed live on Rocky 10. Without one, every
+        terminal-launching action in the widget/security-check shortcuts
+        silently has nothing to use. xterm is installed explicitly to
+        guarantee one is always present — it's tiny (a handful of X11/font
+        libs, vs. ~20 Qt6/KDE packages for konsole, the next lightest
+        alternative actually available on EL10) and matches the widget's
+        xterm candidate (see openclaw_widget.py's _TERMINAL_CANDIDATES)."""
         self.run('dnf -y group install "Server with GUI"', capture_output=False)
-        self.pkg_install("gnome-remote-desktop")
+        self.pkg_install("gnome-remote-desktop", "xterm")
 
     def setup_gnome_remote_desktop(self, username, password):
         """Configure GNOME Remote Desktop in --system (remote-login) mode and

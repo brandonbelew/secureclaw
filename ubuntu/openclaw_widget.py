@@ -402,14 +402,19 @@ def run_command(cmd, shell=True, timeout=10):
 # xrdp always forces an XFCE session (xfce4-terminal available) even on a
 # GNOME box, but GNOME Remote Desktop systems (Rocky/RHEL 10, which has no
 # X.Org and so no xrdp/XFCE at all — see detect_and_setup_desktop()) don't
-# have XFCE at all, and even within GNOME the default terminal app varies by
-# version (gnome-terminal vs. the newer GNOME Console/kgx), so several GNOME
-# candidates are listed. Each entry is (binary, argv-builder) since terminals
-# don't share a CLI contract: xfce4-terminal and kgx each want a single
-# --command= string they re-parse themselves (kgx has no --title option at
-# all — verified against its actual manpage, not guessed), while
-# gnome-terminal/konsole/x-terminal-emulator take the command as literal
-# trailing argv after a separator.
+# have XFCE at all — and confirmed live on Rocky 10, EL10's "Server with GUI"
+# group doesn't ship ANY terminal by default: neither gnome-terminal nor
+# gnome-console/kgx is even packaged for EL10. install_gnome_desktop() (see
+# platform_support.py) now explicitly installs xterm to guarantee one is
+# always present there. x-terminal-emulator is Debian-only (its own
+# update-alternatives convention — RHEL has no such binary at all, verified
+# live), so it only ever resolves on Debian/Ubuntu; xterm covers the same
+# "last resort, always available" role on RHEL. Each entry is
+# (binary, argv-builder) since terminals don't share a CLI contract:
+# xfce4-terminal and kgx each want a single --command= string they re-parse
+# themselves (kgx has no --title option at all — verified against its actual
+# manpage, not guessed), while the rest take the command as literal trailing
+# argv after a separator.
 _TERMINAL_CANDIDATES = [
     ("xfce4-terminal", lambda title, bash_c: (
         f"xfce4-terminal --title={shlex.quote(title)} --command={shlex.quote(bash_c)}"
@@ -423,8 +428,11 @@ _TERMINAL_CANDIDATES = [
     ("konsole", lambda title, bash_c: (
         f"konsole --title {shlex.quote(title)} -e {bash_c}"
     )),
-    ("x-terminal-emulator", lambda title, bash_c: (
+    ("x-terminal-emulator", lambda title, bash_c: (  # Debian/Ubuntu only
         f"x-terminal-emulator -T {shlex.quote(title)} -e {bash_c}"
+    )),
+    ("xterm", lambda title, bash_c: (  # last resort — provisioned explicitly on EL10/GRD
+        f"xterm -T {shlex.quote(title)} -e {bash_c}"
     )),
 ]
 
