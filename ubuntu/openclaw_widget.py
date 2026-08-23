@@ -54,6 +54,55 @@ LOGO_B64 = (
     "JYZvVlkZUOI6kfDq/xDwi4L/AKG5ITVmS9opAAAAAElFTkSuQmCC"
 )
 
+# Hermes Agent icon — derived from https://hermes-agent.nousresearch.com/icon.png
+# (their site's own declared app icon, 48x48). The source is black line art on
+# an opaque white background; recolored to light-on-transparent here so it reads
+# against this widget's dark theme, same as the lobster logo above.
+HERMES_LOGO_B64 = (
+    "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"
+    "gHpraybORdMAAAAASUVORK5CYII="
+)
+
 REPO_OWNER = "brandonbelew"
 REPO_NAME = "secureclaw"
 DEFAULT_PORT = 18789
@@ -123,6 +172,7 @@ AGENT_META = {
         "browser_label": "Start Browser",
         "browser_sub": "Start the OpenClaw managed browser",
         "update_sub": "Checks openclaw update status",
+        "logo_b64": LOGO_B64,
     },
     "hermes": {
         "label": "Hermes Agent",
@@ -133,6 +183,7 @@ AGENT_META = {
         "browser_label": "Configure Tools",
         "browser_sub": "Open hermes tools in a terminal",
         "update_sub": "Checks hermes update status",
+        "logo_b64": HERMES_LOGO_B64,
     },
 }
 
@@ -429,8 +480,10 @@ class AgentWidget(Gtk.Window):
         self.tools_data = []
         self._tool_rows = {}
 
-        # Build lobster pixbuf once — reused at header (48px) and action rows (24px)
-        _logo_data = base64.b64decode(LOGO_B64)
+        # Build the agent's logo pixbuf once — reused at header (48px) and
+        # action rows (24px). OpenClaw's is the SecureClaw lobster mascot;
+        # Hermes's is their own site icon (see HERMES_LOGO_B64 above).
+        _logo_data = base64.b64decode(self.meta["logo_b64"])
         _stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(_logo_data))
         self.logo_pixbuf_48 = GdkPixbuf.Pixbuf.new_from_stream_at_scale(
             _stream, 48, 48, True, None
