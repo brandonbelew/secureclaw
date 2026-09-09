@@ -1504,7 +1504,7 @@ TAILSCALE TROUBLESHOOTING:
         # NodeSource publishes both deb and rpm setup scripts; install_node()
         # picks the right one and pulls in the build toolchain (build-essential
         # on Debian, gcc/gcc-c++/make on RHEL).
-        self.plat.install_node("22")
+        self.plat.install_node("26")
 
         # Run the official OpenClaw installer as the target user.
         # Node.js is already present so the installer skips the sudo step.
@@ -1550,7 +1550,7 @@ TAILSCALE TROUBLESHOOTING:
         self.log("Installing Node.js and build tools...")
         print(f"\n  {Colors.WARNING}{Colors.BOLD}⚠  Note:{Colors.ENDC}{Colors.WARNING} This step can take 2–3 minutes and may appear to hang.{Colors.ENDC}")
         print(f"  {Colors.WARNING}   If progress stops, press Enter a few times to continue.{Colors.ENDC}\n")
-        self.plat.install_node("22")
+        self.plat.install_node("26")
 
         # Run the official Hermes installer as the target user. --skip-setup
         # defers API-key / messaging-platform configuration to a later

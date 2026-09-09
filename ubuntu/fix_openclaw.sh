@@ -68,22 +68,38 @@ pkill -u "$TARGET_USER" -f openclaw-gateway 2>/dev/null || true
 sleep 1
 ok "Stale processes cleared"
 
-# ── Step 3: Ensure Node.js is present (installer needs it, can't sudo without TTY) ──
-info "Ensuring Node.js is installed..."
-if ! command -v node &>/dev/null; then
+# ── Step 3: Ensure Node.js is present and new enough (installer needs it, can't sudo without TTY) ──
+# OpenClaw's installer hard-requires Node 24.16.0+ or 26.1.0+ and refuses to
+# run on an older active Node (this used to be v22, which it now rejects).
+node_is_supported() {
+    command -v node &>/dev/null || return 1
+    local ver="$(node --version)"; ver="${ver#v}"
+    local major="${ver%%.*}"; local rest="${ver#*.}"; local minor="${rest%%.*}"
+    [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+    (( major > 26 )) && return 0
+    (( major == 26 && minor >= 1 )) && return 0
+    (( major == 24 && minor >= 16 )) && return 0
+    return 1
+}
+
+info "Ensuring Node.js is installed and supported (24.16.0+ or 26.1.0+)..."
+if ! node_is_supported; then
+    if command -v node &>/dev/null; then
+        warn "Found Node.js $(node --version), which OpenClaw's installer no longer accepts — upgrading to 26.x"
+    fi
     # NodeSource + build toolchain differ by distro family.
     if command -v apt-get &>/dev/null; then
-        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+        curl -fsSL https://deb.nodesource.com/setup_26.x | bash -
         apt-get install -y nodejs build-essential cmake make g++ python3
     elif command -v dnf &>/dev/null; then
-        curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
+        curl -fsSL https://rpm.nodesource.com/setup_26.x | bash -
         dnf -y install nodejs gcc gcc-c++ make cmake python3
     else
         die "Unsupported system: need apt (Debian/Ubuntu) or dnf (Fedora/RHEL/Rocky)."
     fi
-    ok "Node.js installed"
+    ok "Node.js installed ($(node --version))"
 else
-    ok "Node.js already present ($(node --version))"
+    ok "Node.js already present and supported ($(node --version))"
 fi
 
 # ── Step 4: Re-install via official installer ─────────────────────────────────

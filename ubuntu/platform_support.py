@@ -352,7 +352,7 @@ class Platform:
             self.pkg_refresh()
             self.pkg_install("google-chrome-stable")
 
-    def install_node(self, major="22"):
+    def install_node(self, major="26"):
         """NodeSource publishes both deb and rpm setup scripts.
 
         Also installs the build toolchain + git, which OpenClaw's installer and
